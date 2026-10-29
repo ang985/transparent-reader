@@ -7,7 +7,23 @@ const { buildCSS } = require('./styles');
 
 if (process.env.VR_NO_GPU === '1') app.disableHardwareAcceleration();
 
-const DATA_DIR = process.env.VR_DATA_DIR || 'E:\\Tools\\transparent-reader-data';
+// 数据目录选取顺序：
+//   1. 环境变量 VR_DATA_DIR —— 想固定到某个位置时用
+//   2. 旧版本沿用的 E:\Tools\transparent-reader-data —— 本机升级时不丢页签状态
+//   3. 系统用户数据目录（Windows 下是 %APPDATA%\transparent-reader）
+// 这样别人 clone 下来零配置即可运行，也不会往他的盘上乱建目录。
+function resolveDataDir() {
+  if (process.env.VR_DATA_DIR) return process.env.VR_DATA_DIR;
+
+  const legacy = 'E:\\Tools\\transparent-reader-data';
+  try {
+    if (fs.existsSync(path.join(legacy, 'state.json'))) return legacy;
+  } catch (_) { /* 没有这个盘符，正常忽略 */ }
+
+  return path.join(app.getPath('appData'), 'transparent-reader');
+}
+
+const DATA_DIR = resolveDataDir();
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   app.setPath('userData', DATA_DIR);

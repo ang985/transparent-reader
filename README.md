@@ -36,6 +36,9 @@ npm start
 > Requires Electron 33.x; the first install downloads roughly 100 MB of runtime.
 > Set the `ELECTRON_CACHE` environment variable to keep the cache on another drive.
 
+> **Windows only.** The launcher scripts (`.bat`, `.ps1`) and the window-transparency helper are Windows-specific.
+> Data is stored under `%APPDATA%\transparent-reader` unless you point `VR_DATA_DIR` somewhere else.
+
 ### Shortcuts
 
 | Shortcut | Action |
@@ -99,6 +102,9 @@ npm start
 
 > 依赖 Electron 33.x，首次安装会下载约 100MB 的运行时。
 > 可通过环境变量 `ELECTRON_CACHE` 把缓存指到其它盘。
+
+> **仅支持 Windows**：启动脚本（`.bat`、`.ps1`）与窗口透明化辅助脚本都是 Windows 专用。
+> 运行数据默认存放在 `%APPDATA%\transparent-reader`，可用 `VR_DATA_DIR` 指定到别处。
 
 ### 快捷键
 
