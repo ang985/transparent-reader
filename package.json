@@ -1,0 +1,25 @@
+{
+  "name": "transparent-reader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Transparent always-on-top reading overlay: keeps page text, removes page background",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "electron",
+    "overlay",
+    "transparent",
+    "reader",
+    "always-on-top"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ang985/transparent-reader.git"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

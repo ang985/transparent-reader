@@ -1,0 +1,10 @@
+# 依赖与缓存（276MB，不需要上传）
+node_modules/
+
+# 运行日志
+*.log
+zt.log
+
+# 系统文件
+Thumbs.db
+.DS_Store

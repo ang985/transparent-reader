@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>悬浮阅读层</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --line: #e6e8ec;
+    --line-soft: #f0f1f4;
+    --fg: #14161a;
+    --muted: #6b7280;
+    --muted-2: #9aa1ad;
+    --brand: #2563eb;
+    --brand-dark: #1d4ed8;
+    --brand-soft: #eff4ff;
+    --danger: #dc2626;
+    --danger-soft: #fef2f2;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- 标题栏 ---------- */
+  .titlebar {
+    height: 48px;
+    flex: 0 0 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px 0 14px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; }
+  .logo {
+    width: 24px; height: 24px;
+    border-radius: 7px;
+    background: linear-gradient(140deg, #3b82f6, #1d4ed8);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 6px rgba(37,99,235,.34);
+  }
+  .title { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+  .win-actions { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+  .icon-btn {
+    width: 32px; height: 32px;
+    border: 0;
+    background: transparent;
+    border-radius: 7px;
+    color: var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background .14s, color .14s;
+  }
+  .icon-btn:hover { background: #f0f1f4; color: var(--fg); }
+  .icon-btn.danger:hover { background: var(--danger-soft); color: var(--danger); }
+
+  /* ---------- 内容区 ---------- */
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 14px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .content::-webkit-scrollbar { width: 8px; }
+  .content::-webkit-scrollbar-thumb { background: #d5d8de; border-radius: 4px; }
+  .content::-webkit-scrollbar-thumb:hover { background: #c2c6ce; }
+  .content::-webkit-scrollbar-track { background: transparent; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 14px;
+    box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .card-head h2 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: .6px;
+    text-transform: uppercase;
+  }
+
+  /* ---------- 网址 ---------- */
+  .row { display: flex; gap: 8px; }
+  .input-wrap {
+    flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 7px;
+    height: 36px;
+    padding: 0 10px;
+    background: #fbfbfc;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    transition: border-color .14s, box-shadow .14s, background .14s;
+  }
+  .input-wrap:focus-within {
+    background: #fff;
+    border-color: #a9c2f8;
+    box-shadow: 0 0 0 3px rgba(37,99,235,.12);
+  }
+  .input-wrap svg { flex: 0 0 14px; color: var(--muted-2); }
+  input#url {
+    flex: 1; min-width: 0;
+    border: 0; outline: none;
+    background: transparent;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--fg);
+  }
+  input#url::placeholder { color: var(--muted-2); }
+
+  .btn {
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--fg);
+    border-radius: 9px;
+    height: 36px;
+    padding: 0 16px;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .14s, border-color .14s, box-shadow .14s, transform .06s;
+  }
+  .btn:hover { background: #fafafb; border-color: #d8dbe1; }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary {
+    background: linear-gradient(180deg, #3b82f6, #2563eb);
+    border-color: #2563eb;
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(37,99,235,.35);
+  }
+  .btn.primary:hover { background: linear-gradient(180deg, #2f76f0, #1d4ed8); }
+  .btn.danger {
+    color: var(--danger);
+    border-color: #f2d4d4;
+    background: #fff;
+  }
+  .btn.danger:hover { background: var(--danger-soft); border-color: #eebfbf; }
+
+  /* ---------- 最近打开（折叠下拉） ---------- */
+  .recent { margin-top: 7px; border-top: 1px solid var(--line-soft); }
+  .recent[hidden] { display: none; }
+  .recent > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 26px;
+    font-size: 11.5px;
+    color: var(--muted-2);
+    user-select: none;
+    border-radius: 7px;
+    padding: 0 4px;
+    transition: color .14s, background .14s;
+  }
+  .recent > summary::-webkit-details-marker { display: none; }
+  .recent > summary:hover { color: var(--muted); background: #f7f8fa; }
+  .recent > summary .chev { margin-left: auto; color: var(--muted-2); transition: transform .18s; }
+  .recent[open] > summary .chev { transform: rotate(90deg); }
+  .recent-count {
+    min-width: 16px;
+    padding: 0 5px;
+    height: 15px;
+    line-height: 15px;
+    text-align: center;
+    border-radius: 999px;
+    background: #eef0f4;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px 0 2px;
+    max-height: 176px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .recent-list::-webkit-scrollbar { width: 7px; }
+  .recent-list::-webkit-scrollbar-thumb { background: #d9dce2; border-radius: 4px; }
+  .recent-list::-webkit-scrollbar-track { background: transparent; }
+
+  .recent-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 6px 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .12s;
+  }
+  .recent-item:hover { background: var(--brand-soft); }
+  .recent-item .txt { flex: 1; min-width: 0; }
+  .recent-item .name {
+    display: block;
+    font-size: 12.5px;
+    color: #33383f;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent-item:hover .name { color: var(--brand); }
+  .recent-item .path {
+    display: block;
+    font-size: 10.5px;
+    color: var(--muted-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 1px;
+  }
+  .recent-del {
+    flex: 0 0 22px;
+    width: 22px; height: 22px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted-2);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    opacity: .32;
+    transition: opacity .12s, background .12s, color .12s;
+  }
+  .recent-item:hover .recent-del { opacity: 1; }
+  .recent-del:hover { background: var(--danger-soft); color: var(--danger); }
+  .recent-empty { padding: 12px 8px; font-size: 11.5px; color: var(--muted-2); text-align: center; }
+  .recent-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding: 2px 4px 0;
+  }
+  .link-btn {
+    border: 0;
+    background: transparent;
+    color: var(--muted-2);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 3px 6px;
+    border-radius: 6px;
+  }
+  .link-btn:hover { color: var(--danger); background: var(--danger-soft); }
+
+  /* ---------- 显示设置 ---------- */
+  .slider-label {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 9px;
+  }
+  .slider-label span { font-size: 13px; }
+  .slider-label b {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--brand);
+    background: var(--brand-soft);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  input.slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: #e3e6eb;
+    outline: none;
+    margin: 4px 0 2px;
+  }
+  input.slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--brand);
+    box-shadow: 0 1px 3px rgba(16,24,40,.28);
+    cursor: pointer;
+    transition: transform .12s;
+  }
+  input.slider::-webkit-slider-thumb:hover { transform: scale(1.12); }
+  .hint { font-size: 11.5px; color: var(--muted-2); margin-top: 6px; }
+
+  .divider { height: 1px; background: var(--line-soft); margin: 13px -14px; }
+
+  .switch {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+  }
+  .switch + .switch { border-top: 1px solid var(--line-soft); }
+  .switch .txt { min-width: 0; }
+  .switch .txt span { font-size: 13px; }
+  .switch .txt small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 3px; line-height: 1.45; }
+
+  .toggle { position: relative; flex: 0 0 38px; width: 38px; height: 22px; cursor: pointer; }
+  .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .toggle i {
+    position: absolute; inset: 0;
+    background: #d6dae1;
+    border-radius: 999px;
+    transition: background .18s;
+  }
+  .toggle i::after {
+    content: "";
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 16px; height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(16,24,40,.28);
+    transition: transform .18s;
+  }
+  .toggle input:checked + i { background: var(--brand); }
+  .toggle input:checked + i::after { transform: translateX(16px); }
+  .toggle input:focus-visible + i { box-shadow: 0 0 0 3px rgba(37,99,235,.2); }
+
+  /* ---------- 操作说明 ---------- */
+  .tips-card { padding: 0; }
+  .tips-card > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: .6px;
+    text-transform: uppercase;
+    user-select: none;
+  }
+  .tips-card > summary::-webkit-details-marker { display: none; }
+  .tips-card > summary .chev { color: var(--muted-2); transition: transform .18s; }
+  .tips-card[open] > summary .chev { transform: rotate(90deg); }
+  .tips-card[open] > summary { padding-bottom: 4px; }
+  .tips { margin: 0; padding: 4px 14px 14px; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  .tips li { display: flex; gap: 10px; align-items: flex-start; font-size: 12px; color: var(--muted); line-height: 1.6; }
+  .tips kbd {
+    flex: 0 0 auto;
+    min-width: 74px;
+    text-align: center;
+    background: #f7f8fa;
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 6px;
+    padding: 2px 7px;
+    font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+    font-size: 11px;
+    color: #3d434e;
+    line-height: 1.5;
+  }
+
+  /* ---------- 底部 ---------- */
+  .footer {
+    flex: 0 0 auto;
+    padding: 10px 14px 12px;
+    background: var(--card);
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .status {
+    font-size: 11.5px;
+    color: var(--brand);
+    min-height: 15px;
+    line-height: 1.4;
+  }
+  .status.err { color: var(--danger); }
+  .foot-actions { display: flex; gap: 8px; }
+  .foot-actions .btn { flex: 1; height: 34px; }
+</style>
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo">文</span>
+      <span class="title">悬浮阅读层</span>
+    </div>
+    <div class="win-actions">
+      <button class="icon-btn" id="minimize" title="最小化">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 6h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn danger" id="closePanel" title="关闭面板">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="content">
+    <section class="card">
+      <div class="card-head"><h2>打开网址</h2></div>
+      <div class="row">
+        <label class="input-wrap">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M6.5 9.5l3-3M9.6 3.5l1.2-1.2a2.4 2.4 0 013.4 3.4l-1.2 1.2M6.4 12.5l-1.2 1.2a2.4 2.4 0 01-3.4-3.4l1.2-1.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="url" type="text" placeholder="粘贴网址，如 news.example.com" spellcheck="false" />
+        </label>
+        <button id="open" class="btn primary">打开</button>
+      </div>
+      <details class="recent" id="recentBox" hidden>
+        <summary>
+          <span>最近打开</span>
+          <span class="recent-count" id="recentCount">0</span>
+          <svg class="chev" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 2.5L8 6l-3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </summary>
+        <div class="recent-list" id="recentList"></div>
+        <div class="recent-foot" id="recentFoot">
+          <button class="link-btn" id="clearHistory">清空最近记录</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>显示</h2></div>
+
+      <div class="slider-label">
+        <span>背景浓度</span>
+        <b id="alphaVal">20%</b>
+      </div>
+      <input id="alpha" class="slider" type="range" min="0" max="92" step="2" value="20" />
+      <div class="hint">0% 只留文字几乎全透明；调高更像一张磨砂卡片，也更不容易被看清。</div>
+
+      <div class="divider"></div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>隐藏图片</span>
+          <small>只留文字，最不显眼</small>
+        </div>
+        <label class="toggle"><input id="hideImages" type="checkbox" checked /><i></i></label>
+      </div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>专注模式</span>
+          <small>去掉页头、导航、广告、评论区</small>
+        </div>
+        <label class="toggle"><input id="focus" type="checkbox" checked /><i></i></label>
+      </div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>始终置顶</span>
+          <small>勾上后压在所有窗口上面；关闭后可被其它窗口盖住</small>
+        </div>
+        <label class="toggle"><input id="onTop" type="checkbox" /><i></i></label>
+      </div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>锁定窗口大小</span>
+          <small>打开后拖窗口边缘不再改变大小，抓滚动条不会误拖</small>
+        </div>
+        <label class="toggle"><input id="lockSize" type="checkbox" checked /><i></i></label>
+      </div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>工具条常亮</span>
+          <small>顶部导航条始终完全显示，鼠标移开也不变淡</small>
+        </div>
+        <label class="toggle"><input id="barAlways" type="checkbox" /><i></i></label>
+      </div>
+    </section>
+
+    <details class="card tips-card">
+      <summary>
+        <span>怎么用</span>
+        <svg class="chev" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 2.5L8 6l-3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </summary>
+      <ul class="tips">
+        <li><kbd>顶部工具条</kbd><span>鼠标移到浮层顶端出现：‹ 后退、› 前进、↻ 刷新、⋯ 设置、× 关闭页签</span></li>
+        <li><kbd>页签</kbd><span>点标签切换页面，点标签上的 × 关掉它，点 + 再开一个</span></li>
+        <li><kbd>滚轮 / 左键</kbd><span>翻页、点链接、点选项，和正常浏览器一样</span></li>
+        <li><kbd>Ctrl + 滚轮</kbd><span>缩放页面（Ctrl + / − 或 Ctrl+0 复位），顶部工具条不跟着缩放</span></li>
+        <li><kbd>Alt + ← / →</kbd><span>后退 / 前进</span></li>
+        <li><kbd>Alt + 拖动</kbd><span>在页面任意位置整体挪动窗口</span></li>
+        <li><kbd>窗口边缘</kbd><span>需先在面板关闭「锁定窗口大小」，才能拖动边缘调整大小</span></li>
+        <li><kbd>Esc</kbd><span>关闭当前页签</span></li>
+        <li><kbd>托盘图标</kbd><span>单击把浮层唤到最前，双击打开面板，右键更多操作</span></li>
+      </ul>
+    </details>
+  </main>
+
+  <footer class="footer">
+    <div class="status" id="status"></div>
+    <div class="foot-actions">
+      <button id="raise" class="btn">提到最前</button>
+      <button id="closeAll" class="btn">关闭全部浮层</button>
+      <button id="quit" class="btn danger">退出程序</button>
+    </div>
+  </footer>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const url = $('url');
+  const alpha = $('alpha');
+  const alphaVal = $('alphaVal');
+  const hideImages = $('hideImages');
+  const onTop = $('onTop');
+  const lockSize = $('lockSize');
+  const barAlways = $('barAlways');
+  const focus = $('focus');
+  const status = $('status');
+  const recentBox = $('recentBox');
+  const recentList = $('recentList');
+  const recentCount = $('recentCount');
+  const recentFoot = $('recentFoot');
+
+  function setStatus(t, isErr) {
+    status.textContent = t || '';
+    status.classList.toggle('err', !!isErr);
+  }
+
+  function paintSlider() {
+    const v = Number(alpha.value) || 0;
+    const p = Math.round((v / 92) * 100);
+    alpha.style.background = 'linear-gradient(to right, var(--brand) ' + p + '%, #e3e6eb ' + p + '%)';
+    alphaVal.textContent = v + '%';
+  }
+
+  function shortLabel(u) {
+    try {
+      const o = new URL(u);
+      const host = o.host.replace(/^www\./, '');
+      const seg = o.pathname.split('/').filter(Boolean).pop() || '';
+      return seg && seg.length <= 10 ? host + '/' + seg : host;
+    } catch (e) {
+      return String(u).replace(/^https?:\/\//, '').slice(0, 22);
+    }
+  }
+
+  function renderRecent(list) {
+    const items = (list || []).filter(Boolean);
+    recentBox.hidden = items.length === 0;
+    recentCount.textContent = String(items.length);
+    recentFoot.style.display = items.length ? 'flex' : 'none';
+    recentList.innerHTML = '';
+
+    items.forEach((u) => {
+      const row = document.createElement('div');
+      row.className = 'recent-item';
+      row.title = '点击填入网址';
+
+      const txt = document.createElement('div');
+      txt.className = 'txt';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = shortLabel(u);
+      const path = document.createElement('span');
+      path.className = 'path';
+      path.textContent = String(u).replace(/^https?:\/\//, '').replace(/\/$/, '');
+      txt.appendChild(name);
+      txt.appendChild(path);
+      row.appendChild(txt);
+
+      const del = document.createElement('button');
+      del.className = 'recent-del';
+      del.title = '从最近记录中删除';
+      del.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        const s = await window.vr.dropHistory(u);
+        if (s) applyState(s);
+      };
+      row.appendChild(del);
+
+      row.onclick = () => {
+        url.value = u;
+        url.focus();
+        setStatus('已填入网址，按回车或点「打开」');
+      };
+      recentList.appendChild(row);
+    });
+  }
+
+  $('clearHistory').onclick = async (e) => {
+    e.stopPropagation();
+    const s = await window.vr.clearHistory();
+    if (s) applyState(s);
+  };
+
+  function applyState(s) {
+    if (!s) return;
+    if (s.url && !url.value) url.value = s.url;
+    alpha.value = Math.round((s.alpha || 0) * 100);
+    paintSlider();
+    hideImages.checked = !!s.hideImages;
+    focus.checked = !!s.focus;
+    onTop.checked = s.onTop !== false;
+    lockSize.checked = s.lockSize !== false;
+    barAlways.checked = !!s.barAlways;
+    renderRecent(s.history);
+  }
+
+  $('open').onclick = async () => {
+    const v = url.value.trim();
+    if (!v) { setStatus('请先填网址', true); url.focus(); return; }
+    setStatus('正在新页签里打开…');
+    const r = await window.vr.open(v);
+    if (!r || !r.ok) setStatus((r && r.error) || '打开失败', true);
+  };
+
+  url.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('open').click();
+  });
+
+  alpha.addEventListener('input', () => {
+    paintSlider();
+    window.vr.setAlpha(Number(alpha.value) / 100);
+  });
+
+  hideImages.onchange = () => window.vr.setOpt('hideImages', hideImages.checked);
+  focus.onchange = () => window.vr.setOpt('focus', focus.checked);
+  onTop.onchange = () => window.vr.setOpt('onTop', onTop.checked);
+  lockSize.onchange = () => window.vr.setOpt('lockSize', lockSize.checked);
+  barAlways.onchange = () => window.vr.setOpt('barAlways', barAlways.checked);
+
+  $('raise').onclick = async () => {
+    const r = await window.vr.raise();
+    setStatus(r && r.ok ? '已把浮层提到最前' : '当前没有浮层，先在下面打开一个网址', !(r && r.ok));
+  };
+
+  $('closeAll').onclick = () => window.vr.closeAll();
+  $('quit').onclick = () => window.vr.quit();
+
+  $('minimize').onclick = () => { if (window.vr.minimize) window.vr.minimize(); };
+  $('closePanel').onclick = () => { if (window.vr.closePanel) window.vr.closePanel(); };
+
+  window.vr.onState(applyState);
+  window.vr.getState().then(applyState);
+  paintSlider();
+</script>
+</body>
+</html>
