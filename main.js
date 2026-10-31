@@ -403,8 +403,8 @@ function applyTop(win) {
 // 既能可靠地盖到最前，又不会违背"不始终置顶"的选择。
 let raiseTimer = null;
 
-function raiseOverlay() {
-  const win = currentOverlay();
+function raiseOverlay(target) {
+  const win = (target && !target.isDestroyed()) ? target : currentOverlay();
   if (!win || win.isDestroyed()) return false;
 
   // 胶囊还开着 = 当前处于「已收起」状态。此时若只把主窗 show 出来，屏幕上会
@@ -419,6 +419,7 @@ function raiseOverlay() {
     if (!win.isVisible()) win.show();
     win.setAlwaysOnTop(true, 'screen-saver');
     win.moveTop();
+    hideOtherOverlays(win);   // 多页签时把其它 tab 的窗口收起来，避免叠窗
     // 只 moveTop 是"视觉上在最前"，键盘焦点仍在别的程序上，
     // 于是看着窗口在顶层，按 Alt+Q 却毫无反应。
     // 这里把焦点真正拿过来：app.focus({steal:true}) 用于突破 Windows 的前台锁定。
@@ -815,7 +816,9 @@ function makeMiniWindow(onReveal) {
     }
   };
   m.once('ready-to-show', reveal);
-  setTimeout(() => { if (!m.isDestroyed() && !m.isVisible()) reveal(); }, 400);
+  // 无条件兜底：透明窗口不一定触发 ready-to-show。原来这里带 !m.isVisible() 判断，
+  // 一旦胶囊已经可见而 reveal 因故没跑，主窗就永远不会被隐藏，于是胶囊和主窗叠在一起。
+  setTimeout(() => { if (!m.isDestroyed()) reveal(); }, 400);
 
   m.on('closed', () => {
     if (miniWin === m) miniWin = null;
@@ -823,6 +826,14 @@ function makeMiniWindow(onReveal) {
     if (!miniSwapping && miniFor) expandOverlay();
   });
   return m;
+}
+
+// 保证任何时刻最多只有一个浮层窗口可见。keep 传 null 表示全部隐藏。
+function hideOtherOverlays(keep) {
+  for (const w of overlays) {
+    if (!w || w === keep || w.isDestroyed()) continue;
+    try { if (w.isVisible()) w.hide(); } catch (_) { /* ignore */ }
+  }
 }
 
 function toggleMini() {
@@ -847,7 +858,9 @@ function collapseOverlay() {
   // 会触发 window-all-closed 把程序退掉。
   // 胶囊显示并拿到焦点之后，再把主窗藏起来 —— 焦点是无缝转移的，
   // 中间不会出现"焦点跑到别的程序上又被抢回来"的闪动。
-  miniWin = makeMiniWindow(() => { try { win.hide(); } catch (_) { /* ignore */ } });
+  // 收起时隐藏所有浮层窗口，不只是当前这个：多页签下每个 tab 都是独立窗口，
+  // 漏掉一个就会留下「胶囊 + 旧窗口」同屏的错乱状态。
+  miniWin = makeMiniWindow(() => { hideOtherOverlays(null); });
   log('collapse overlay #' + (win.__st && win.__st.tabId) + ' -> mini at ' + miniBounds.x + ',' + miniBounds.y);
   notifyPanel();
   return { ok: true };
@@ -864,6 +877,7 @@ function expandOverlay() {
       try { win.setBounds(miniBounds); } catch (_) { /* ignore */ }
     }
     win.showInactive();
+    hideOtherOverlays(win);      // 展开只留这一个，其它页签的窗口一律收起
   }
   const m = miniWin;
   miniWin = null;
@@ -872,7 +886,9 @@ function expandOverlay() {
     try { m.destroy(); } catch (_) { /* ignore */ }
     miniSwapping = false;
   }
-  if (win && !win.isDestroyed()) raiseOverlay();
+  // 明确抬起"被收起的那一个"，不能用 currentOverlay() —— lastActive 会被
+  // 任何窗口的 focus 事件改写，多页签时容易抬错窗口，把别的 tab 也 show 出来。
+  raiseOverlay(win);
   log('expand overlay from mini');
   notifyPanel();
   return { ok: true };
