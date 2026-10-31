@@ -312,7 +312,7 @@ function createOverlay(rawUrl, opts = {}) {
     if (!input.alt || input.control || input.meta || input.shift) return;
     if (String(input.key || '').toLowerCase() !== 'q') return;
     event.preventDefault();
-    collapseOverlay();
+    toggleMini();
   });
 
   overlays.add(win);
@@ -406,6 +406,14 @@ let raiseTimer = null;
 function raiseOverlay() {
   const win = currentOverlay();
   if (!win || win.isDestroyed()) return false;
+
+  // 胶囊还开着 = 当前处于「已收起」状态。此时若只把主窗 show 出来，屏幕上会
+  // 同时出现主窗和胶囊；而且再按 Alt+Q 会撞上 collapseOverlay 的防重入判断
+  // 静默返回（快捷键看起来完全失效）。所以先把状态还原成完整窗口。
+  if (miniWin && !miniWin.isDestroyed()) {
+    expandOverlay();     // 内部会销毁胶囊并再调一次本函数，那时 miniWin 已置空
+    return true;
+  }
 
   try {
     if (!win.isVisible()) win.show();
@@ -817,6 +825,17 @@ function makeMiniWindow(onReveal) {
   return m;
 }
 
+function toggleMini() {
+  if (miniWin && !miniWin.isDestroyed()) {
+    log('toggle mini -> expand');
+    expandOverlay();
+  } else {
+    log('toggle mini -> collapse');
+    collapseOverlay();
+  }
+  return { ok: true };
+}
+
 function collapseOverlay() {
   const win = currentOverlay();
   if (!win || win.isDestroyed()) return { ok: false };
@@ -835,7 +854,9 @@ function collapseOverlay() {
 }
 
 function expandOverlay() {
-  const win = miniFor;
+  // 兜底：万一 miniFor 已被清空（异常路径），也要能把主窗还回来，
+  // 否则 raiseOverlay 里调本函数会变成「什么都没发生」。
+  const win = miniFor || currentOverlay();
   miniFor = null;
   // 顺序很重要：先显示主窗，再销毁胶囊
   if (win && !win.isDestroyed()) {
