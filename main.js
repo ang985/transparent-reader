@@ -52,9 +52,11 @@ const DEFAULT_STATE = {
 };
 
 let state = { ...DEFAULT_STATE };
-const overlays = new Set();   // 所有页签窗口
-let tabSeq = 0;               // 页签 id 自增
-let activeTabId = null;       // 当前显示的页签
+// 单窗口模式（页签功能已移除）：任何时刻最多只有一个阅读层窗口。
+// 之前每个页签一个 BrowserWindow，虽然做了"只显示一个"的约束，但焦点、收起、
+// 展开三条路径都要各自维护，一漏就叠窗。现在没有第二个窗口，这类 bug 从根上没了。
+let overlayWin = null;
+let winSeq = 0;               // 窗口代号：异步回调里判断"还是不是当初那个窗口"
 let lastActive = null;
 let panelWin = null;
 let dragTimer = null;
@@ -99,11 +101,10 @@ function loadState() {
 
 function saveState() {
   try {
-    const list = [...overlays].filter((w) => !w.isDestroyed());
-    if (list.length) {
-      state.tabs = list.map((w) => ({ url: w.__st.url, title: w.__st.title || '' }));
-      const idx = list.findIndex((w) => w.__st.tabId === activeTabId);
-      state.activeTab = idx >= 0 ? idx : 0;
+    // tabs 字段只为兼容旧的 state.json（老版本存过多页签），现在最多一条。
+    if (overlayWin && !overlayWin.isDestroyed()) {
+      state.tabs = [{ url: overlayWin.__st.url, title: overlayWin.__st.title || '' }];
+      state.activeTab = 0;
     }
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
@@ -152,6 +153,26 @@ function createOverlay(rawUrl, opts = {}) {
     url = 'https://' + url;
   }
 
+  // 已经有阅读层了：直接在它里面跳转，绝不再开第二个窗口。
+  // 这是页签功能移除后最关键的一条 —— 从面板、历史记录、页面内链接
+  // 打开的网址，永远落在同一个窗口里。
+  const existing = currentOverlay();
+  if (existing) {
+    log('reuse overlay for ' + url.slice(0, 60));
+    existing.__st.url = url;
+    try {
+      existing.loadURL(url).catch((e) => log('loadURL(reuse): ' + e.message));
+    } catch (e) {
+      log('reuse loadURL failed: ' + e.message);
+    }
+    state.url = url;
+    state.history = [url, ...state.history.filter((u) => u !== url)].slice(0, 20);
+    raiseOverlay(existing);
+    saveState();
+    notifyPanel();
+    return existing;
+  }
+
   const b = overlayBounds();
 
   const win = new BrowserWindow({
@@ -190,10 +211,11 @@ function createOverlay(rawUrl, opts = {}) {
     zoom: clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX),
     hideImages: state.hideImages,
     focus: state.focus,
-    tabId: ++tabSeq,
+    id: ++winSeq,
     title: '',
     url,
   };
+  overlayWin = win;
 
   win.setAlwaysOnTop(state.onTop !== false, state.onTop !== false ? 'screen-saver' : 'normal');
   win.setMenuBarVisibility(false);
@@ -204,8 +226,8 @@ function createOverlay(rawUrl, opts = {}) {
     return { action: 'deny' };
   });
 
-  win.webContents.on('dom-ready', () => { applyCSS(win); syncPagePrefs(win); sendTabs(); });
-  win.webContents.on('did-finish-load', () => { applyCSS(win); syncPagePrefs(win); sendTabs(); });
+  win.webContents.on('dom-ready', () => { applyCSS(win); syncPagePrefs(win); });
+  win.webContents.on('did-finish-load', () => { applyCSS(win); syncPagePrefs(win); });
   win.webContents.on('did-fail-load', (_e, code, desc) => log(`load failed ${code} ${desc}`));
   win.webContents.on('context-menu', (e) => e.preventDefault());
 
@@ -227,7 +249,6 @@ function createOverlay(rawUrl, opts = {}) {
 
   win.webContents.on('page-title-updated', (_e, title) => {
     win.__st.title = String(title || '').trim().slice(0, 40);
-    sendTabs();
     saveStateDebounced();
   });
   win.webContents.on('did-navigate', (_e, u) => {
@@ -241,38 +262,43 @@ function createOverlay(rawUrl, opts = {}) {
 
   win.loadURL(url).catch((e) => log('loadURL: ' + e.message));
 
+  let revealed = false;
   const reveal = () => {
     if (win.isDestroyed()) return;
-    if (win.__st.tabId !== activeTabId) return;
+    if (overlayWin !== win) return;
+    // 已经收成胶囊了就不要再把它冒出来 —— 否则收起后 400ms 的主窗兜底
+    // 会和胶囊同时出现在屏幕上，这正是之前"两个窗口重叠"的成因之一。
+    if (miniWin && !miniWin.isDestroyed()) return;
+    if (!revealed) {
+      revealed = true;
+      // 第一次显示时把窗口和焦点一起拿过来：用户刚点了「打开」，
+      // 焦点若留在别的程序上，Alt+Q 会像失灵一样毫无反应。
+      raiseOverlay(win);
+      return;
+    }
     if (!win.isVisible()) win.showInactive();
     applyTop(win);
     win.moveTop();
   };
   win.once('ready-to-show', reveal);
+  // 透明窗口不一定会触发 ready-to-show，必须加时间兜底
+  setTimeout(reveal, 400);
+  setTimeout(reveal, 1600);
 
   win.on('focus', () => { lastActive = win; });
   win.on('resized', () => {
-    if (win.isDestroyed() || win.__st.tabId !== activeTabId) return;
+    if (win.isDestroyed() || overlayWin !== win) return;
     const [w, h] = win.getSize();
     state.width = clamp(w, MIN_W, 1600);
     state.height = clamp(h, MIN_H, 1400);
-    mirrorBounds(win);
     saveStateDebounced();
   });
   win.on('moved', () => {
-    if (win.isDestroyed() || win.__st.tabId !== activeTabId) return;
+    if (win.isDestroyed() || overlayWin !== win) return;
     const [x, y] = win.getPosition();
     state.x = x;
     state.y = y;
-    mirrorBounds(win);
     saveStateDebounced();
-  });
-  // 关闭当前页签时，先把下一个顶上来，再让这个窗口消失，
-  // 否则会先露出桌面再出现新页面（又是"闪一下"）。
-  win.on('close', () => {
-    if (!win.__st || win.__st.tabId !== activeTabId) return;
-    const next = [...overlays].find((w) => w !== win && !w.isDestroyed());
-    if (next) activateTab(next);
   });
 
   win.on('closed', () => {
@@ -288,18 +314,21 @@ function createOverlay(rawUrl, opts = {}) {
         miniSwapping = false;
       }
     }
-    const wasActive = win.__st && win.__st.tabId === activeTabId;
-    log('tab closed #' + (win.__st ? win.__st.tabId : '?') + ' wasActive=' + wasActive);
-    overlays.delete(win);
+    log('overlay closed #' + (win.__st ? win.__st.id : '?'));
+    if (overlayWin === win) overlayWin = null;
     if (lastActive === win) lastActive = null;
-    if (wasActive) {
-      activeTabId = null;
-      const next = [...overlays].find((w) => !w.isDestroyed());
-      if (next) activateTab(next);
-    }
-    sendTabs();
     saveState();
     notifyPanel();
+
+    // 从面板打开网址时面板会隐藏让位。这时关掉这个唯一的阅读层，屏幕上就
+    // 什么都不剩了（面板窗口对象还在，所以 window-all-closed 也不会触发），
+    // 用户会以为程序卡死。这里把面板叫回来。
+    if (!quitting) {
+      setTimeout(() => {
+        if (quitting) return;
+        if (!panelWin || panelWin.isDestroyed() || !panelWin.isVisible()) showPanel();
+      }, 0);
+    }
   });
 
   // Alt+Q 收起成胶囊。
@@ -315,79 +344,15 @@ function createOverlay(rawUrl, opts = {}) {
     toggleMini();
   });
 
-  overlays.add(win);
   lastActive = win;
-  log('tab create #' + win.__st.tabId + ' activate=' + (opts.activate !== false) + ' total=' + overlays.size + ' resizable=' + win.isResizable() + ' ' + url.slice(0, 40));
+  log('overlay create #' + win.__st.id + ' resizable=' + win.isResizable() + ' ' + url.slice(0, 40));
 
   state.url = url;
   state.history = [url, ...state.history.filter((u) => u !== url)].slice(0, 20);
 
-  // 立刻把新页签推给所有窗口，让当前页面顶部马上多出一个标签，
-  // 而不是等新页面加载完才出现（否则会觉得"点了没反应"）
-  sendTabs();
-
-  if (opts.activate === false) {
-    sendTabs();
-    saveState();
-    return win;
-  }
-
-  // 第一个页签必须立刻显示；后续新页签等页面画出第一帧再切换，
-  // 否则会看到"旧页签消失 → 空白 → 新页面"的闪白。
-  if (overlays.size === 1) {
-    activateTab(win);
-    setTimeout(reveal, 400);
-    setTimeout(reveal, 1600);
-  } else {
-    let switched = false;
-    const swap = () => {
-      if (switched || win.isDestroyed()) return;
-      switched = true;
-      activateTab(win);
-    };
-    win.webContents.once('dom-ready', () => setTimeout(swap, 60));
-    setTimeout(swap, 2500);
-  }
-
+  saveState();
   notifyPanel();
   return win;
-}
-
-function tabTitle(win) {
-  const t = (win.__st && win.__st.title ? win.__st.title : '').trim();
-  if (t) return t;
-  try {
-    return new URL(win.__st.url).host.replace(/^www\./, '');
-  } catch (_) {
-    return String((win.__st && win.__st.url) || '').slice(0, 24);
-  }
-}
-
-function sendTabs() {
-  const list = [...overlays]
-    .filter((w) => !w.isDestroyed())
-    .map((w) => ({
-      id: w.__st.tabId,
-      title: tabTitle(w),
-      active: w.__st.tabId === activeTabId,
-    }));
-
-  for (const w of overlays) {
-    if (w.isDestroyed()) continue;
-    try {
-      w.webContents.send('vr-tabs', { selfId: w.__st.tabId, list });
-    } catch (_) {}
-  }
-}
-
-function mirrorBounds(win) {
-  const b = overlayBounds();
-  for (const w of overlays) {
-    if (w === win || w.isDestroyed()) continue;
-    try {
-      w.setBounds({ x: b.x, y: b.y, width: b.w, height: b.h });
-    } catch (_) {}
-  }
 }
 
 function applyTop(win) {
@@ -397,6 +362,7 @@ function applyTop(win) {
     win.setAlwaysOnTop(on, on ? 'screen-saver' : 'normal');
   } catch (_) {}
 }
+
 
 // 把浮层从别的窗口下面"捞"回来。
 // 非置顶状态下，单纯 moveTop 有时会被系统压住，所以先临时置顶 1.2 秒再恢复，
@@ -419,7 +385,6 @@ function raiseOverlay(target) {
     if (!win.isVisible()) win.show();
     win.setAlwaysOnTop(true, 'screen-saver');
     win.moveTop();
-    hideOtherOverlays(win);   // 多页签时把其它 tab 的窗口收起来，避免叠窗
     // 只 moveTop 是"视觉上在最前"，键盘焦点仍在别的程序上，
     // 于是看着窗口在顶层，按 Alt+Q 却毫无反应。
     // 这里把焦点真正拿过来：app.focus({steal:true}) 用于突破 Windows 的前台锁定。
@@ -440,62 +405,12 @@ function raiseOverlay(target) {
       }
     }, 1200);
   }
-  log('raise overlay #' + (win.__st ? win.__st.tabId : '?') + ' onTop=' + (state.onTop !== false));
+  log('raise overlay #' + (win.__st ? win.__st.id : '?') + ' onTop=' + (state.onTop !== false));
   return true;
 }
 
-function activateTab(win) {
-  if (!win || win.isDestroyed()) return;
-
-  // 顺序很重要：先把新页签摆好并显示，再隐藏旧的。
-  // 反过来做，中间那一帧桌面会露出来，看起来就是"闪一下"。
-  const b = overlayBounds();
-  let cur = null;
-  try {
-    cur = win.getBounds();
-  } catch (_) {
-    cur = null;
-  }
-  if (!cur || cur.x !== b.x || cur.y !== b.y || cur.width !== b.w || cur.height !== b.h) {
-    try {
-      win.setBounds({ x: b.x, y: b.y, width: b.w, height: b.h });
-    } catch (_) {}
-  }
-
-  win.setAlwaysOnTop(state.onTop !== false, state.onTop !== false ? 'screen-saver' : 'normal');
-  // 切页签是用户主动操作，焦点必须跟过来；只 moveTop 会让键盘还留在旧窗口上
-  if (!win.isVisible()) win.show();
-  win.moveTop();
-  try { win.focus(); } catch (_) { /* ignore */ }
-  try { win.webContents.focus(); } catch (_) { /* ignore */ }
-
-  for (const w of overlays) {
-    if (w === win || w.isDestroyed()) continue;
-    if (w.isVisible()) w.hide();
-  }
-
-  log('tab activate #' + win.__st.tabId + ' visible=' + win.isVisible() + ' top=' + win.isAlwaysOnTop() + ' total=' + overlays.size);
-  activeTabId = win.__st.tabId;
-  lastActive = win;
-
-  // 透明窗口刚显示时有时会被别的置顶窗口压住，300ms 后再抬一次
-  setTimeout(() => {
-    if (win.isDestroyed() || activeTabId !== win.__st.tabId) return;
-    applyTop(win);
-    win.moveTop();
-  }, 300);
-
-  sendTabs();
-  setTimeout(sendTabs, 700);
-  setTimeout(sendTabs, 2000);
-  saveState();
-  notifyPanel();
-}
-
 function currentOverlay() {
-  if (lastActive && !lastActive.isDestroyed()) return lastActive;
-  const list = [...overlays].filter((w) => !w.isDestroyed());
-  return list[list.length - 1] || null;
+  return (overlayWin && !overlayWin.isDestroyed()) ? overlayWin : null;
 }
 
 function refresh(win) {
@@ -612,13 +527,13 @@ function createTray() {
       { label: '把浮层提到最前', enabled: has, click: () => raiseOverlay() },
       { label: state.onTop !== false ? '取消置顶（可被其它窗口盖住）' : '恢复置顶', enabled: has, click: () => {
         state.onTop = state.onTop === false;
-        for (const w of overlays) { if (!w.isDestroyed()) applyTop(w); }
+        const w = currentOverlay();
+        if (w) applyTop(w);
         saveState();
         notifyPanel();
       } },
       { type: 'separator' },
-      { label: '关闭当前浮层', enabled: has, click: () => { const w = currentOverlay(); if (w) w.close(); } },
-      { label: '关闭全部浮层', enabled: overlays.size > 0, click: () => { for (const w of [...overlays]) if (!w.isDestroyed()) w.close(); } },
+      { label: '关闭浮层', enabled: has, click: () => { const w = currentOverlay(); if (w) w.close(); } },
       { type: 'separator' },
       { label: '退出', click: () => { app.quit(); } },
     ]));
@@ -696,12 +611,12 @@ ipcMain.handle('vr-alpha-all', (_e, v) => {
 });
 
 ipcMain.handle('vr-opt', (_e, key, val) => {
+  const win = currentOverlay();
   if (key === 'onTop') {
     state.onTop = !!val;
-    for (const w of overlays) {
-      if (w.isDestroyed()) continue;
-      applyTop(w);
-      if (state.onTop && w.__st.tabId === activeTabId) w.moveTop();
+    if (win) {
+      applyTop(win);
+      if (state.onTop) win.moveTop();
     }
     saveState();
     notifyPanel();
@@ -709,10 +624,9 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
   }
   if (key === 'barAlways') {
     state.barAlways = !!val;
-    for (const w of overlays) {
-      if (w.isDestroyed()) continue;
-      w.__barHover = null;   // 关掉常亮后重新按光标判断
-      try { w.webContents.send('vr-bar-always', state.barAlways); } catch (_) {}
+    if (win) {
+      win.__barHover = null;   // 关掉常亮后重新按光标判断
+      try { win.webContents.send('vr-bar-always', state.barAlways); } catch (_) {}
     }
     saveState();
     notifyPanel();
@@ -720,25 +634,21 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
   }
   if (key === 'lockSize') {
     state.lockSize = !!val;
-    for (const w of overlays) {
-      if (!w.isDestroyed()) {
-        try {
-          w.setResizable(!state.lockSize);
-        } catch (_) {}
-      }
+    if (win) {
+      try {
+        win.setResizable(!state.lockSize);
+      } catch (_) {}
     }
-    log('lockSize=' + state.lockSize + ' applied to ' + overlays.size + ' window(s)');
+    log('lockSize=' + state.lockSize + ' applied to ' + (win ? 1 : 0) + ' window(s)');
     saveState();
     notifyPanel();
     return { ok: true };
   }
   if (key === 'hideImages' || key === 'focus') {
     state[key] = !!val;
-    for (const w of overlays) {
-      if (!w.isDestroyed()) {
-        w.__st[key] = !!val;
-        refresh(w);
-      }
+    if (win) {
+      win.__st[key] = !!val;
+      refresh(win);
     }
     saveState();
     notifyPanel();
@@ -747,7 +657,8 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
 });
 
 ipcMain.handle('vr-close-all', () => {
-  for (const w of [...overlays]) if (!w.isDestroyed()) w.close();
+  const win = currentOverlay();
+  if (win) win.close();
   return { ok: true };
 });
 
@@ -828,14 +739,6 @@ function makeMiniWindow(onReveal) {
   return m;
 }
 
-// 保证任何时刻最多只有一个浮层窗口可见。keep 传 null 表示全部隐藏。
-function hideOtherOverlays(keep) {
-  for (const w of overlays) {
-    if (!w || w === keep || w.isDestroyed()) continue;
-    try { if (w.isVisible()) w.hide(); } catch (_) { /* ignore */ }
-  }
-}
-
 function toggleMini() {
   if (miniWin && !miniWin.isDestroyed()) {
     log('toggle mini -> expand');
@@ -858,10 +761,11 @@ function collapseOverlay() {
   // 会触发 window-all-closed 把程序退掉。
   // 胶囊显示并拿到焦点之后，再把主窗藏起来 —— 焦点是无缝转移的，
   // 中间不会出现"焦点跑到别的程序上又被抢回来"的闪动。
-  // 收起时隐藏所有浮层窗口，不只是当前这个：多页签下每个 tab 都是独立窗口，
-  // 漏掉一个就会留下「胶囊 + 旧窗口」同屏的错乱状态。
-  miniWin = makeMiniWindow(() => { hideOtherOverlays(null); });
-  log('collapse overlay #' + (win.__st && win.__st.tabId) + ' -> mini at ' + miniBounds.x + ',' + miniBounds.y);
+  // 单窗口模式下只需要藏这一个窗口，不会有"漏掉某个页签窗口"的问题。
+  miniWin = makeMiniWindow(() => {
+    if (win && !win.isDestroyed() && win.isVisible()) win.hide();
+  });
+  log('collapse overlay #' + (win.__st && win.__st.id) + ' -> mini at ' + miniBounds.x + ',' + miniBounds.y);
   notifyPanel();
   return { ok: true };
 }
@@ -877,7 +781,6 @@ function expandOverlay() {
       try { win.setBounds(miniBounds); } catch (_) { /* ignore */ }
     }
     win.showInactive();
-    hideOtherOverlays(win);      // 展开只留这一个，其它页签的窗口一律收起
   }
   const m = miniWin;
   miniWin = null;
@@ -886,8 +789,6 @@ function expandOverlay() {
     try { m.destroy(); } catch (_) { /* ignore */ }
     miniSwapping = false;
   }
-  // 明确抬起"被收起的那一个"，不能用 currentOverlay() —— lastActive 会被
-  // 任何窗口的 focus 事件改写，多页签时容易抬错窗口，把别的 tab 也 show 出来。
   raiseOverlay(win);
   log('expand overlay from mini');
   notifyPanel();
@@ -939,7 +840,7 @@ ipcMain.on('vr-zoom-step', (e, dir) => {
   const cur = win.__st.zoom || 1;
   const next = dir > 0 ? cur * ZOOM_STEP : cur / ZOOM_STEP;
   setZoom(win, next);
-  log('zoom #' + win.__st.tabId + ' -> ' + Math.round((win.__st.zoom || 1) * 100) + '%');
+  log('zoom #' + win.__st.id + ' -> ' + Math.round((win.__st.zoom || 1) * 100) + '%');
 });
 
 ipcMain.on('vr-prefs-ask', (e) => {
@@ -959,28 +860,6 @@ ipcMain.on('vr-zoom-reset', (e) => {
 ipcMain.on('vr-reload', (e) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   if (win && !win.isDestroyed()) win.reload();
-});
-
-function tabById(id) {
-  const n = Number(id);
-  for (const w of overlays) {
-    if (!w.isDestroyed() && w.__st.tabId === n) return w;
-  }
-  return null;
-}
-
-ipcMain.on('vr-tab-activate', (_e, id) => {
-  const w = tabById(id);
-  if (w) activateTab(w);
-});
-
-ipcMain.on('vr-tab-close', (_e, id) => {
-  const w = tabById(id);
-  if (w) w.close();
-});
-
-ipcMain.on('vr-tab-new', () => {
-  showPanel();
 });
 
 function navOf(win) {
@@ -1085,6 +964,15 @@ if (!gotTheLock) {
       app.quit();
       return;
     }
+    // 命令行换页面：electron . --vr-open=https://example.com
+    // 走的就是面板「打开」那条路径 —— 已有阅读层就原地跳转，不会再开一个窗口。
+    const openArg = Array.isArray(argv) ? argv.find((a) => /^--vr-open=/.test(a)) : null;
+    if (openArg) {
+      const target = openArg.slice('--vr-open='.length);
+      log('open requested by command line: ' + target.slice(0, 60));
+      createOverlay(target);
+      return;
+    }
     log('second launch detected, reusing the running instance');
     showPanel();
     const w = currentOverlay();
@@ -1097,15 +985,19 @@ if (!gotTheLock) {
     startBarWatch();
     showPanel();
 
+    // 页签功能已移除：只恢复一个页面。
+    // 旧版 state.json 里 tabs 可能有多条，这里只取当初处于激活态的那一条，
+    // 避免升级后一口气开出好几个窗口。
     const saved = Array.isArray(state.tabs) ? state.tabs.filter((t) => t && t.url) : [];
-    const list = saved.length ? saved : (state.url ? [{ url: state.url }] : []);
-    const active = clamp(Number(state.activeTab) || 0, 0, Math.max(0, list.length - 1));
+    let restoreUrl = '';
+    if (saved.length) {
+      const idx = clamp(Number(state.activeTab) || 0, 0, saved.length - 1);
+      restoreUrl = saved[idx].url || saved[0].url;
+    } else if (state.url) {
+      restoreUrl = state.url;
+    }
 
-    list.forEach((t, i) => {
-      createOverlay(t.url, { activate: i === active });
-    });
-
-
+    if (restoreUrl) createOverlay(restoreUrl);
   });
 }
 
@@ -1114,19 +1006,19 @@ let lastClosedKind = '';
 app.on('before-quit', () => { quitting = true; });
 
 app.on('window-all-closed', () => {
-  // 关掉最后一个页签时不要顺手退出整个程序 —— 浏览器关掉最后一个标签页
+  // 关掉阅读层时不要顺手退出整个程序 —— 浏览器关掉最后一个标签页
   // 也不会把浏览器关掉。这里把控制面板叫出来：想继续就点个网址，想退再点退出。
   // 但如果用户关的就是控制面板本身，那就照常退出，否则面板会变成"关不掉"。
   if (quitting) {
     app.quit();
     return;
   }
-  const hasTabs = Array.isArray(state.tabs) && state.tabs.length > 0;
-  if (lastClosedKind !== 'overlay' || (!hasTabs && !state.url)) {
+  const hasSavedPage = !!(state.url || (Array.isArray(state.tabs) && state.tabs.length > 0));
+  if (lastClosedKind !== 'overlay' || !hasSavedPage) {
     app.quit();
     return;
   }
-  log('last tab closed, keeping app alive with panel');
+  log('overlay closed, keeping app alive with panel');
   showPanel();
 });
 

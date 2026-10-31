@@ -15,7 +15,7 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 ### Features
 
 - **Transparent reading layer** — page backgrounds are wiped out while text stays sharp and readable (with a subtle text-shadow halo), floating above other applications
-- **Multi-tab** — browser-like tabs with back / forward / reload; tabs are restored on the next launch
+- **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar, last page restored on launch
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
 - **Answer-sheet state detection** — on quiz sites (e.g. Fenbi) answer grids are colour-coded as correct / wrong / answered
 - **Collapse to a pill** — shrink the whole window into a 244×34 pill parked in a screen corner; double-click or hotkey to expand
@@ -51,7 +51,7 @@ npm start
 
 ```
 transparent-reader/
-├── main.js               # main process: windows / tabs / tray / pill / persistence
+├── main.js               # main process: window / tray / pill / persistence
 ├── preload-overlay.js    # overlay injection: toolbar, frame, transparency, answer-grid
 ├── preload-panel.js      # settings panel bridge
 ├── preload-mini.js       # collapsed pill bridge
@@ -82,7 +82,7 @@ MIT
 ### 功能特性
 
 - **透明阅读层**：网页背景被抹掉，文字保留清晰可读（带光晕描边），浮在其它应用之上
-- **多页签**：与浏览器一致的多页签操作，支持前进 / 后退 / 刷新，关闭程序后自动恢复页签
+- **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新，启动恢复上次页面
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
 - **答题卡状态识别**：刷题网站（如粉笔）答题卡按对 / 错 / 已答自动着色标识
 - **收起为小胶囊**：一键收成 244×34 的小胶囊挂在屏幕角落，双击或快捷键展开
@@ -118,7 +118,7 @@ npm start
 
 ```
 transparent-reader/
-├── main.js               # 主进程：窗口/页签/托盘/胶囊/状态持久化
+├── main.js               # 主进程：窗口/托盘/胶囊/状态持久化
 ├── preload-overlay.js    # 阅读层注入：工具条/描边/透明化/答题卡识别
 ├── preload-panel.js      # 控制面板桥接
 ├── preload-mini.js       # 小胶囊桥接

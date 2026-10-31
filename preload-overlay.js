@@ -207,20 +207,8 @@ function buildToolbar() {
   handle.textContent = '阅读层';
   bar.appendChild(handle);
 
-  const tabsWrap = document.createElement('div');
-  tabsWrap.id = 'vr-tabs';
-  tabsWrap.style.flex = '0 1 auto';
-  tabsWrap.style.maxWidth = '56%';
-  tabsWrap.style.display = 'flex';
-  tabsWrap.style.alignItems = 'center';
-  tabsWrap.style.gap = '4px';
-  tabsWrap.style.height = '100%';
-  tabsWrap.style.overflow = 'hidden';
-  tabsWrap.style.setProperty('-webkit-app-region', 'no-drag');
-  tabsWrap.style.cursor = 'default';
-  bar.appendChild(tabsWrap);
-
-  // 页签右边的空白留作拖动区，否则整个工具条只剩左边 52px 能拖
+  // 页签条已移除（单窗口模式）：这里原本放标签，现在留出的整段空白
+  // 都当作拖动区，工具条比之前更好拖。
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
   spacer.style.height = '100%';
@@ -1106,106 +1094,6 @@ function scanOverlays() {
   markAnswerGrid();
 }
 
-
-// ---- 页签条 ----
-function renderTabs(payload) {
-  const wrap = document.getElementById('vr-tabs');
-  if (!wrap) return;
-  wrap.textContent = '';
-
-  const list = payload && Array.isArray(payload.list) ? payload.list : [];
-
-  list.slice(0, 8).forEach((t) => {
-    const chip = document.createElement('div');
-    const s = chip.style;
-    s.maxWidth = '110px';
-    s.minWidth = '30px';
-    s.height = '20px';
-    s.display = 'flex';
-    s.alignItems = 'center';
-    s.padding = '0 3px 0 7px';
-    s.borderRadius = '4px';
-    s.fontSize = '11.5px';
-    s.whiteSpace = 'nowrap';
-    s.overflow = 'hidden';
-    s.cursor = 'default';
-    s.setProperty('-webkit-app-region', 'no-drag');
-    if (t.active) {
-      s.background = 'rgba(11,78,162,.16)';
-      s.color = '#0b4ea2';
-      s.fontWeight = '600';
-    } else {
-      s.background = 'rgba(0,0,0,.07)';
-      s.color = '#3a3f47';
-    }
-
-    const label = document.createElement('span');
-    label.textContent = String(t.title || '').slice(0, 14) || '新页签';
-    label.title = t.title || '';
-    label.style.flex = '1';
-    label.style.overflow = 'hidden';
-    label.style.textOverflow = 'ellipsis';
-    label.style.whiteSpace = 'nowrap';
-    chip.appendChild(label);
-
-    const close = document.createElement('span');
-    close.textContent = '×';
-    close.title = '关闭这个页签';
-    close.style.flex = 'none';
-    close.style.fontSize = '12px';
-    close.style.lineHeight = '1';
-    close.style.padding = '0 2px';
-    close.style.opacity = '0.5';
-    close.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    close.addEventListener('mouseenter', () => { close.style.opacity = '1'; });
-    close.addEventListener('mouseleave', () => { close.style.opacity = '0.5'; });
-    close.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      ipcRenderer.send('vr-tab-close', t.id);
-    });
-    chip.appendChild(close);
-
-    if (!t.active) {
-      chip.addEventListener('mouseenter', () => { s.background = 'rgba(0,0,0,.13)'; });
-      chip.addEventListener('mouseleave', () => { s.background = 'rgba(0,0,0,.07)'; });
-    }
-    chip.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    chip.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (!t.active) ipcRenderer.send('vr-tab-activate', t.id);
-    });
-
-    wrap.appendChild(chip);
-  });
-
-  const plus = document.createElement('div');
-  plus.textContent = '+';
-  plus.title = '打开新页签';
-  const ps = plus.style;
-  ps.flex = 'none';
-  ps.width = '18px';
-  ps.height = '18px';
-  ps.display = 'flex';
-  ps.alignItems = 'center';
-  ps.justifyContent = 'center';
-  ps.borderRadius = '3px';
-  ps.fontSize = '14px';
-  ps.color = '#3a3f47';
-  ps.cursor = 'default';
-  ps.setProperty('-webkit-app-region', 'no-drag');
-  plus.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  plus.addEventListener('mouseenter', () => { ps.background = 'rgba(0,0,0,.10)'; });
-  plus.addEventListener('mouseleave', () => { ps.background = 'transparent'; });
-  plus.addEventListener('click', (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    ipcRenderer.send('vr-tab-new');
-  });
-  wrap.appendChild(plus);
-}
-
 function boot() {
   const ok = paintRoot() && buildFrame() && buildToolbar();
   if (ok) {
@@ -1260,10 +1148,6 @@ ipcRenderer.on('vr-zoom', (_e, z) => {
     applyBarZoom();
     setTimeout(tidyOverflowX, 200);
   }
-});
-
-ipcRenderer.on('vr-tabs', (_e, payload) => {
-  renderTabs(payload);
 });
 
 let dragging = false;
