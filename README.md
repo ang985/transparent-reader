@@ -18,7 +18,7 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 - **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
 - **Answer-sheet state detection** — on quiz sites (e.g. Fenbi) answer grids are colour-coded as correct / wrong / answered
-- **Collapse to a pill** — shrink the whole window into a 244×34 pill parked in a screen corner; double-click or hotkey to expand
+- **Collapse to a pill** — shrink the whole window into a small pill parked in a screen corner; double-click or hotkey to expand
 - **`Alt+Q` shortcut** — implemented on `before-input-event`, so it survives page navigation; no system-wide hotkey is registered
 - **`Ctrl` + wheel zoom** — zoom the page while the top toolbar keeps its physical size
 - **Window controls** — always-on-top toggle, size lock, always-visible toolbar, temporary top-most raise
@@ -44,6 +44,7 @@ npm start
 | Shortcut | Action |
 |---|---|
 | `Alt+Q` | Collapse to the pill / expand again (while the overlay or the pill has focus) |
+| `Alt+P` | Summon the control panel from the overlay or the pill |
 | `Ctrl` + wheel | Zoom the page (the toolbar does not zoom) |
 | `Alt+←` / `Alt+→` | Go back / forward |
 
@@ -85,7 +86,7 @@ MIT
 - **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新。启动只开控制面板，点「打开」才出现阅读层（上次的网址已自动填好）
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
 - **答题卡状态识别**：刷题网站（如粉笔）答题卡按对 / 错 / 已答自动着色标识
-- **收起为小胶囊**：一键收成 244×34 的小胶囊挂在屏幕角落，双击或快捷键展开
+- **收起为小胶囊**：一键收成小胶囊挂在屏幕角落，双击或快捷键展开
 - **`Alt+Q` 快捷收起**：基于 `before-input-event` 实现，页面跳转不影响，不注册系统级热键
 - **Ctrl+滚轮缩放**：页面缩放时顶部工具条保持物理尺寸不变
 - **窗口控制**：始终置顶开关、锁定窗口大小、工具条常亮、临时置顶唤回
@@ -111,6 +112,7 @@ npm start
 | 快捷键 | 作用 |
 |---|---|
 | `Alt+Q` | 收起为小胶囊 / 再按恢复（焦点在阅读层或胶囊上时） |
+| `Alt+P` | 从阅读层或胶囊唤出控制面板 |
 | `Ctrl+滚轮` | 页面缩放（工具条不跟着缩放） |
 | `Alt+←` / `Alt+→` | 页面后退 / 前进 |
 

@@ -77,10 +77,17 @@ function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
 }
 
+// 日志超过 1MB 就清空重来。原来只 append 不轮转，日志会一直长，而且每次写都是
+// 同步 IO 卡在主线进程上——文件越大越慢。
+const LOG_MAX_BYTES = 1024 * 1024;
+
 function log(msg) {
   try {
-    fs.appendFileSync(path.join(app.getPath('userData'), 'run.log'),
-      `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+    const file = path.join(app.getPath('userData'), 'run.log');
+    try {
+      if (fs.statSync(file).size > LOG_MAX_BYTES) fs.truncateSync(file, 0);
+    } catch (_) { /* 文件还不存在，正常 */ }
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
   } catch (_) { /* ignore */ }
 }
 
@@ -132,17 +139,24 @@ async function applyCSS(win) {
 }
 
 function overlayBounds() {
-  const wa = screen.getPrimaryDisplay().workArea;
   const w = state.width;
   const h = state.height;
   let x = state.x;
   let y = state.y;
-  if (x == null || y == null) {
-    x = wa.x + wa.width - w - 40;
-    y = wa.y + 80;
+
+  // 边界要按窗口自己所在的那块屏算。原来固定用 getPrimaryDisplay()，
+  // 把窗口放到第二块屏后，重启或再展开时会被拽回主屏。
+  const known = (x != null && y != null);
+  const area = known
+    ? screen.getDisplayMatching({ x: Math.round(x), y: Math.round(y), width: w, height: h }).workArea
+    : screen.getPrimaryDisplay().workArea;
+
+  if (!known) {
+    x = area.x + area.width - w - 40;
+    y = area.y + 80;
   }
-  x = clamp(x, wa.x - w + 80, wa.x + wa.width - 80);
-  y = clamp(y, wa.y - h + 80, wa.y + wa.height - 80);
+  x = clamp(x, area.x - w + 80, area.x + area.width - 80);
+  y = clamp(y, area.y - h + 80, area.y + area.height - 80);
   return { x: Math.round(x), y: Math.round(y), w, h };
 }
 
@@ -331,7 +345,7 @@ function createOverlay(rawUrl, opts = {}) {
     }
   });
 
-  // Alt+Q 收起成胶囊。
+  // Alt+Q 收起成胶囊、Alt+P 唤出控制面板。
   // 放在 webContents 的 before-input-event 而不是页面里的 keydown：
   //   1. 页面每次导航 preload 都会重跑一遍，注册时机容易出岔子；
   //   2. 页面自己吞键（stopPropagation / 富文本编辑器）也拦不到这一层；
@@ -339,9 +353,16 @@ function createOverlay(rawUrl, opts = {}) {
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     if (!input.alt || input.control || input.meta || input.shift) return;
-    if (String(input.key || '').toLowerCase() !== 'q') return;
-    event.preventDefault();
-    toggleMini();
+    const key = String(input.key || '').toLowerCase();
+    if (key === 'q') {
+      event.preventDefault();
+      toggleMini();
+      return;
+    }
+    if (key === 'p') {
+      event.preventDefault();
+      showPanel();
+    }
   });
 
   lastActive = win;
@@ -575,7 +596,13 @@ function showPanel() {
 
   panelWin.setMenuBarVisibility(false);
   panelWin.loadFile(path.join(__dirname, 'panel.html'));
-  panelWin.once('ready-to-show', () => { if (panelWin && !panelWin.isDestroyed()) { panelWin.focus(); panelWin.moveTop(); } });
+  // 面板加载完才抢焦点。但如果这时候已经有阅读层（VR_AUTOVIEW 启动即开窗的场景），
+  // 焦点必须留在阅读层上，否则 Alt+Q 落在面板上，按了没反应。
+  panelWin.once('ready-to-show', () => {
+    if (!panelWin || panelWin.isDestroyed()) return;
+    panelWin.moveTop();
+    if (!currentOverlay()) panelWin.focus();
+  });
   panelWin.on('closed', () => { panelWin = null; lastClosedKind = 'panel'; });
 }
 
@@ -691,6 +718,9 @@ function makeMiniWindow(onReveal) {
     x: px,
     y: py,
     frame: false,
+    // 注意：Windows + 透明窗口存在约 64px 的最小内容高度，请求 34 实际会得到 64
+    // （实测 thickFrame:false / useContentSize / setBounds 都压不下去）。
+    // 所以 mini.html 让胶囊填满 100% 高度，视觉尺寸就是窗口尺寸，不留"看得见却点不动"的死区。
     transparent: true,
     backgroundColor: '#00000000',
     hasShadow: false,

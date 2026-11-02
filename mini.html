@@ -84,11 +84,16 @@
         try { window.vrMini.expand(); } catch (e) {}
       });
 
-      // 胶囊有焦点时，Alt+Q 也能展开（和收起用的是同一个键）
+      // 胶囊有焦点时：Alt+Q 展开（和收起用的是同一个键），Alt+P 唤出控制面板
       window.addEventListener('keydown', function (e) {
-        if (e.altKey && !e.ctrlKey && !e.metaKey && String(e.key).toLowerCase() === 'q') {
+        if (!e.altKey || e.ctrlKey || e.metaKey) return;
+        var k = String(e.key).toLowerCase();
+        if (k === 'q') {
           e.preventDefault();
           try { window.vrMini.expand(); } catch (err) {}
+        } else if (k === 'p') {
+          e.preventDefault();
+          try { window.vrMini.panel(); } catch (err) {}
         }
       });
     })();
