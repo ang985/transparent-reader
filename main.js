@@ -983,21 +983,25 @@ if (!gotTheLock) {
     loadState();
     createTray();
     startBarWatch();
+
+    // 启动只打开控制面板，阅读层按需再开：
+    // 双击桌面图标时不应该突然在屏幕上盖一层窗口 —— 用户可能只是想改个浓度、
+    // 或者先看看最近看过什么。上次的网址已经由 state.url 带给面板，
+    // 面板会自动填进输入框，回车一下就回到上次那页。
+    // 想让它启动就自动开窗口，可设环境变量 VR_AUTOVIEW=1。
     showPanel();
 
-    // 页签功能已移除：只恢复一个页面。
-    // 旧版 state.json 里 tabs 可能有多条，这里只取当初处于激活态的那一条，
-    // 避免升级后一口气开出好几个窗口。
-    const saved = Array.isArray(state.tabs) ? state.tabs.filter((t) => t && t.url) : [];
-    let restoreUrl = '';
-    if (saved.length) {
-      const idx = clamp(Number(state.activeTab) || 0, 0, saved.length - 1);
-      restoreUrl = saved[idx].url || saved[0].url;
-    } else if (state.url) {
-      restoreUrl = state.url;
+    if (process.env.VR_AUTOVIEW === '1') {
+      const saved = Array.isArray(state.tabs) ? state.tabs.filter((t) => t && t.url) : [];
+      let restoreUrl = '';
+      if (saved.length) {
+        const idx = clamp(Number(state.activeTab) || 0, 0, saved.length - 1);
+        restoreUrl = saved[idx].url || saved[0].url;
+      } else if (state.url) {
+        restoreUrl = state.url;
+      }
+      if (restoreUrl) createOverlay(restoreUrl);
     }
-
-    if (restoreUrl) createOverlay(restoreUrl);
   });
 }
 

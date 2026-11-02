@@ -15,7 +15,7 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 ### Features
 
 - **Transparent reading layer** — page backgrounds are wiped out while text stays sharp and readable (with a subtle text-shadow halo), floating above other applications
-- **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar, last page restored on launch
+- **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
 - **Answer-sheet state detection** — on quiz sites (e.g. Fenbi) answer grids are colour-coded as correct / wrong / answered
 - **Collapse to a pill** — shrink the whole window into a 244×34 pill parked in a screen corner; double-click or hotkey to expand
@@ -82,7 +82,7 @@ MIT
 ### 功能特性
 
 - **透明阅读层**：网页背景被抹掉，文字保留清晰可读（带光晕描边），浮在其它应用之上
-- **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新，启动恢复上次页面
+- **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新。启动只开控制面板，点「打开」才出现阅读层（上次的网址已自动填好）
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
 - **答题卡状态识别**：刷题网站（如粉笔）答题卡按对 / 错 / 已答自动着色标识
 - **收起为小胶囊**：一键收成 244×34 的小胶囊挂在屏幕角落，双击或快捷键展开
