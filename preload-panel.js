@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('vr', {
   fit: (h) => ipcRenderer.invoke('vr-fit', h),
   dropHistory: (u) => ipcRenderer.invoke('vr-history-drop', u),
   clearHistory: () => ipcRenderer.invoke('vr-history-clear'),
+  clearSite: () => ipcRenderer.invoke('vr-site-clear'),
   minimize: () => ipcRenderer.invoke('vr-panel-min'),
   closePanel: () => ipcRenderer.invoke('vr-panel-hide'),
   onState: (cb) => ipcRenderer.on('vr-state', (_e, s) => cb(s)),

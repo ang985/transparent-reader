@@ -309,6 +309,22 @@
   }
   input.slider::-webkit-slider-thumb:hover { transform: scale(1.12); }
   .hint { font-size: 11.5px; color: var(--muted-2); margin-top: 6px; }
+  .site-note {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 8px; padding: 6px 8px;
+    background: rgba(11,78,162,.06);
+    border: 1px solid rgba(11,78,162,.14);
+    border-radius: 6px;
+    font-size: 11.5px; color: #33404f;
+  }
+  .site-note b { color: #0b4ea2; font-weight: 600; }
+  .site-note button {
+    margin-left: auto; flex: none;
+    border: 0; background: transparent; color: var(--muted-2);
+    font-size: 11.5px; cursor: pointer; padding: 0 2px; text-decoration: underline;
+  }
+  .site-note button:hover { color: #b02a2a; }
+  .site-note[hidden] { display: none; }
 
   .divider { height: 1px; background: var(--line-soft); margin: 13px -14px; }
 
@@ -452,6 +468,10 @@
       </div>
       <input id="alpha" class="slider" type="range" min="0" max="92" step="2" value="20" />
       <div class="hint">0% 只留文字几乎全透明；调高更像一张磨砂卡片，也更不容易被看清。</div>
+      <div class="site-note" id="siteNote" hidden>
+        <span id="siteText"></span>
+        <button id="siteClear" type="button">不用记住</button>
+      </div>
 
       <div class="divider"></div>
 
@@ -508,6 +528,9 @@
         <li><kbd>Ctrl + 滚轮</kbd><span>缩放页面（Ctrl + / − 或 Ctrl+0 复位），顶部工具条不跟着缩放</span></li>
         <li><kbd>Alt + Q</kbd><span>收起成小胶囊；在胶囊上再按一次恢复</span></li>
         <li><kbd>Alt + P</kbd><span>在阅读层 / 胶囊上唤出这个控制面板</span></li>
+        <li><kbd>Alt + 滚轮</kbd><span>直接调背景浓度（上滚更浓、下滚更淡），不用回面板拖滑块</span></li>
+        <li><kbd>Alt + T</kbd><span>临时穿透：鼠标可以直接点到下层窗口，再按一次 Alt+T 退出</span></li>
+        <li><kbd>按站点记忆</kbd><span>每个网站单独记住自己的浓度和缩放，切站点自动切回来</span></li>
         <li><kbd>Alt + ← / →</kbd><span>后退 / 前进</span></li>
         <li><kbd>Alt + 拖动</kbd><span>在页面任意位置整体挪动窗口</span></li>
         <li><kbd>窗口边缘</kbd><span>需先在面板关闭「锁定窗口大小」，才能拖动边缘调整大小</span></li>
@@ -615,6 +638,22 @@
     if (s) applyState(s);
   };
 
+  // 站点的单独记忆：让用户知道"为什么这个页面浓度和别的页面不一样"
+  function renderSite(site) {
+    const box = $('siteNote');
+    const txt = $('siteText');
+    if (!box || !txt) return;
+    if (!site || (site.alpha == null && site.zoom == null)) {
+      box.hidden = true;
+      return;
+    }
+    const parts = [];
+    if (site.alpha != null) parts.push('浓度 <b>' + Math.round(site.alpha * 100) + '%</b>');
+    if (site.zoom != null) parts.push('缩放 <b>' + Math.round(site.zoom * 100) + '%</b>');
+    txt.innerHTML = '已单独记住 <b>' + site.key + '</b>：' + parts.join(' · ');
+    box.hidden = false;
+  }
+
   function applyState(s) {
     if (!s) return;
     if (s.url && !url.value) url.value = s.url;
@@ -625,7 +664,16 @@
     onTop.checked = s.onTop !== false;
     lockSize.checked = s.lockSize !== false;
     barAlways.checked = !!s.barAlways;
+    renderSite(s.site);
     renderRecent(s.history);
+  }
+
+  const siteClearBtn = $('siteClear');
+  if (siteClearBtn) {
+    siteClearBtn.onclick = async () => {
+      await window.vr.clearSite();
+      setStatus('已取消这个站点的单独记忆');
+    };
   }
 
   $('open').onclick = async () => {

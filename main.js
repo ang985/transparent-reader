@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { buildCSS } = require('./styles');
@@ -49,6 +49,9 @@ const DEFAULT_STATE = {
   lockSize: true,  // 锁定窗口大小：关闭拖边缘缩放的感应区，避免抢滚动条时误拖
   zoom: 1,         // 页面缩放（Ctrl+滚轮），1 = 100%
   barAlways: false, // 顶部工具条是否常亮（不随鼠标淡出）
+  // 按站点记忆：{ "fenbi.com": { alpha: 0.14, zoom: 1.2 } }
+  // 只存浓度和缩放；没记录的站点用上面的全局默认值。
+  sitePrefs: {},
 };
 
 let state = { ...DEFAULT_STATE };
@@ -67,6 +70,12 @@ let saveTimer = null;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2.4;
 const ZOOM_STEP = 1.1;
+
+const ALPHA_MIN = 0;
+const ALPHA_MAX = 0.92;
+const ALPHA_STEP = 0.03;   // Alt+滚轮每档的浓度变化
+
+const SITE_MAX = 200;      // 站点记忆最多保留多少条
 
 const MIN_W = 340;
 const MIN_H = 320;
@@ -104,6 +113,23 @@ function loadState() {
   state.width = clamp(state.width, MIN_W, 1600);
   state.height = clamp(state.height, MIN_H, 1400);
   if (!Array.isArray(state.history)) state.history = [];
+  // 站点记忆：容错 + 只保留最近 200 个条目，避免这个字段无限长
+  if (!state.sitePrefs || typeof state.sitePrefs !== 'object' || Array.isArray(state.sitePrefs)) {
+    state.sitePrefs = {};
+  }
+  const keys = Object.keys(state.sitePrefs);
+  if (keys.length > SITE_MAX) {
+    for (const k of keys.slice(0, keys.length - SITE_MAX)) delete state.sitePrefs[k];
+  }
+  for (const k of Object.keys(state.sitePrefs)) {
+    const v = state.sitePrefs[k];
+    if (!v || typeof v !== 'object') { delete state.sitePrefs[k]; continue; }
+    const out = {};
+    if (typeof v.alpha === 'number') out.alpha = clamp(v.alpha, 0, 0.92);
+    if (typeof v.zoom === 'number') out.zoom = clamp(v.zoom, ZOOM_MIN, ZOOM_MAX);
+    if (!Object.keys(out).length) delete state.sitePrefs[k];
+    else state.sitePrefs[k] = out;
+  }
 }
 
 function saveState() {
@@ -267,6 +293,9 @@ function createOverlay(rawUrl, opts = {}) {
   });
   win.webContents.on('did-navigate', (_e, u) => {
     win.__st.url = u;
+    // 换了站点就把该站点记住的浓度/缩放套上来；
+    // 具体应用发生在随后的 dom-ready（applyCSS / syncPagePrefs）
+    applySitePrefs(win, u);
     saveStateDebounced();
   });
   win.webContents.on('did-navigate-in-page', (_e, u) => {
@@ -331,6 +360,11 @@ function createOverlay(rawUrl, opts = {}) {
     log('overlay closed #' + (win.__st ? win.__st.id : '?'));
     if (overlayWin === win) overlayWin = null;
     if (lastActive === win) lastActive = null;
+    // 穿透状态跟着窗口走，别留一个指向已销毁窗口的全局热键
+    if (passthrough) {
+      passthrough = false;
+      try { globalShortcut.unregister(PASSTHROUGH_ACCEL); } catch (_) {}
+    }
     saveState();
     notifyPanel();
 
@@ -345,7 +379,7 @@ function createOverlay(rawUrl, opts = {}) {
     }
   });
 
-  // Alt+Q 收起成胶囊、Alt+P 唤出控制面板。
+  // Alt+Q 收起成胶囊、Alt+P 唤出控制面板、Alt+T 临时穿透。
   // 放在 webContents 的 before-input-event 而不是页面里的 keydown：
   //   1. 页面每次导航 preload 都会重跑一遍，注册时机容易出岔子；
   //   2. 页面自己吞键（stopPropagation / 富文本编辑器）也拦不到这一层；
@@ -362,6 +396,11 @@ function createOverlay(rawUrl, opts = {}) {
     if (key === 'p') {
       event.preventDefault();
       showPanel();
+      return;
+    }
+    if (key === 't') {
+      event.preventDefault();
+      togglePassthrough();
     }
   });
 
@@ -449,10 +488,65 @@ function syncPagePrefs(win) {
   // 跳转/刷新后页面是全新的，preload 不知道当前缩放和工具条偏好，
   // 必须补发通知：否则工具条不会按 1/zoom 反向缩放（看着像被放大），
   // 常亮开关也会回退成窗口创建时的旧值。
+  // 浓度也要补发：站点记忆里的浓度和全局默认值不一样，不补发的话
+  // preload 会一直用启动参数 --vr-alpha 里那个全局值。
   try {
     win.webContents.send('vr-zoom', z);
     win.webContents.send('vr-bar-always', !!state.barAlways);
+    win.webContents.send('vr-alpha', win.__st.alpha);
   } catch (_) {}
+}
+
+// ---- 按站点记忆 ----
+// 用 hostname（去掉 www.）当键。path 不参与，否则每个题目页都要记一份。
+function siteKey(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    if (!/^https?:$/i.test(u.protocol)) return '';
+    return u.hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function sitePrefOf(rawUrl) {
+  const key = siteKey(rawUrl);
+  if (!key) return null;
+  const p = state.sitePrefs && state.sitePrefs[key];
+  return p && typeof p === 'object' ? { key, ...p } : { key };
+}
+
+// 记住某个站点的浓度 / 缩放。只有真的改了才写，避免每次都覆盖。
+function rememberSite(win, patch) {
+  if (!win || win.isDestroyed()) return;
+  const key = siteKey(win.__st.url);
+  if (!key) return;
+  const cur = state.sitePrefs[key] || {};
+  const next = { ...cur };
+  let changed = false;
+  for (const k of Object.keys(patch)) {
+    if (next[k] !== patch[k]) { next[k] = patch[k]; changed = true; }
+  }
+  if (!changed) return;
+  state.sitePrefs[key] = next;
+  log('site pref ' + key + ' = ' + JSON.stringify(next));
+}
+
+// 页面切到新地址后，把该站点记住的值套上去（没记过就沿用当前值）。
+function applySitePrefs(win, url) {
+  if (!win || win.isDestroyed()) return;
+  const key = siteKey(url);
+  if (!key) return;
+  const p = state.sitePrefs[key];
+  if (!p) return;
+
+  if (typeof p.alpha === 'number') win.__st.alpha = clamp(p.alpha, ALPHA_MIN, ALPHA_MAX);
+  if (typeof p.zoom === 'number') win.__st.zoom = clamp(p.zoom, ZOOM_MIN, ZOOM_MAX);
+
+  // 这里只改窗口自己的状态；真正的应用交给 dom-ready 之后的
+  // applyCSS / syncPagePrefs，避免往还没加载完的页面上插样式。
+  log('apply site pref ' + key + ' ' + JSON.stringify(p) +
+      ' -> alpha=' + win.__st.alpha + ' zoom=' + win.__st.zoom);
 }
 
 function setZoom(win, z) {
@@ -460,6 +554,7 @@ function setZoom(win, z) {
   const next = clamp(z, ZOOM_MIN, ZOOM_MAX);
   win.__st.zoom = next;
   state.zoom = next;
+  rememberSite(win, { zoom: Number(next.toFixed(3)) });
   try {
     win.webContents.setZoomFactor(next);
   } catch (_) {}
@@ -471,11 +566,71 @@ function setZoom(win, z) {
 }
 
 function setAlpha(win, v) {
-  win.__st.alpha = clamp(v, 0, 0.92);
+  win.__st.alpha = clamp(v, ALPHA_MIN, ALPHA_MAX);
   state.alpha = win.__st.alpha;
+  rememberSite(win, { alpha: Number(win.__st.alpha.toFixed(3)) });
   refresh(win);
-  saveState();
+  // 拖滑块 / Alt+滚轮会连续触发，这里用防抖，避免每一下都同步写盘
+  saveStateDebounced();
   notifyPanel();
+}
+
+// Alt+滚轮：直接调浓度，不用先摸到面板里的滑块
+function stepAlpha(win, dir) {
+  if (!win || win.isDestroyed()) return;
+  const next = clamp(win.__st.alpha + dir * ALPHA_STEP, ALPHA_MIN, ALPHA_MAX);
+  if (Math.abs(next - win.__st.alpha) < 1e-6) return;
+  setAlpha(win, next);
+  log('alpha step -> ' + Math.round(next * 100) + '%');
+}
+
+// ---------------- 临时穿透 ----------------
+// 打开后鼠标直接落到下层窗口：临时点一下被挡住的按钮、或者核对下层内容时用。
+// 关键点是"怎么退出来"：窗口一旦忽略鼠标，键盘焦点也可能跑到别的程序上，
+// Alt+T 就收不到了。所以进入穿透时注册一个**全局**热键专门负责退出，
+// 退出后再立刻注销，不去长期占用这个组合键。
+let passthrough = false;
+const PASSTHROUGH_ACCEL = 'Alt+T';
+
+function setPassthrough(on) {
+  const win = currentOverlay();
+  if (!win) return false;
+  on = !!on;
+  if (on === passthrough) return true;
+
+  if (on) {
+    // 先拿到退出手段再开穿透，注册失败就干脆不进这状态，免得用户被"卡死"
+    let ok = false;
+    try {
+      ok = globalShortcut.register(PASSTHROUGH_ACCEL, () => setPassthrough(false));
+    } catch (e) {
+      log('register passthrough shortcut failed: ' + e.message);
+    }
+    if (!ok) {
+      log('passthrough aborted: ' + PASSTHROUGH_ACCEL + ' unavailable');
+      return false;
+    }
+  }
+
+  passthrough = on;
+  try {
+    win.setIgnoreMouseEvents(on, { forward: true });   // forward 保留 hover，看起来不"死"
+  } catch (e) {
+    log('setIgnoreMouseEvents failed: ' + e.message);
+  }
+  try { win.webContents.send('vr-passthrough', passthrough); } catch (_) {}
+
+  if (!on) {
+    try { globalShortcut.unregister(PASSTHROUGH_ACCEL); } catch (_) {}
+  }
+  log(passthrough ? 'passthrough ON (global ' + PASSTHROUGH_ACCEL + ' to exit)' : 'passthrough OFF');
+  notifyPanel();
+  return true;
+}
+
+function togglePassthrough() {
+  if (!currentOverlay()) return { ok: false };
+  return { ok: setPassthrough(!passthrough) };
 }
 
 function moveBy(win, dx, dy) {
@@ -501,6 +656,8 @@ function toggleVisible() {
 
 function panelState() {
   const win = currentOverlay();
+  const curUrl = win ? win.__st.url : state.url;
+  const site = sitePrefOf(curUrl);
   return {
     url: state.url || '',
     history: state.history || [],
@@ -511,6 +668,13 @@ function panelState() {
     lockSize: state.lockSize !== false,
     barAlways: !!state.barAlways,
     hasOverlay: !!win,
+    passthrough,
+    // 当前站点的记忆值（null 表示这个站点还没单独记过）
+    site: site ? {
+      key: site.key,
+      alpha: typeof site.alpha === 'number' ? site.alpha : null,
+      zoom: typeof site.zoom === 'number' ? site.zoom : null,
+    } : null,
   };
 }
 
@@ -546,6 +710,7 @@ function createTray() {
       { label: '隐藏 / 显示浮层', enabled: has, click: () => toggleVisible() },
       { label: miniWin ? '展开阅读层' : '收起为小胶囊（Alt+Q）', enabled: has || !!miniWin, click: () => { if (miniWin) expandOverlay(); else collapseOverlay(); } },
       { label: '把浮层提到最前', enabled: has, click: () => raiseOverlay() },
+      { label: passthrough ? '退出临时穿透（Alt+T）' : '临时穿透：鼠标穿透下层（Alt+T）', enabled: has, click: () => setPassthrough(!passthrough) },
       { label: state.onTop !== false ? '取消置顶（可被其它窗口盖住）' : '恢复置顶', enabled: has, click: () => {
         state.onTop = state.onTop === false;
         const w = currentOverlay();
@@ -785,6 +950,9 @@ function collapseOverlay() {
   if (!win || win.isDestroyed()) return { ok: false };
   if (miniWin && !miniWin.isDestroyed()) return { ok: true };
 
+  // 穿透状态下收起来会很别扭（胶囊也要能点），先退出穿透
+  if (passthrough) setPassthrough(false);
+
   miniFor = win;
   miniBounds = win.getBounds();
   // 先把胶囊造出来再隐藏主窗：否则这一瞬间没有任何窗口，
@@ -873,8 +1041,27 @@ ipcMain.on('vr-zoom-step', (e, dir) => {
   log('zoom #' + win.__st.id + ' -> ' + Math.round((win.__st.zoom || 1) * 100) + '%');
 });
 
-ipcMain.on('vr-prefs-ask', (e) => {
+// Alt+滚轮调浓度（上滚更浓、下滚更淡）
+ipcMain.on('vr-alpha-step', (e, dir) => {
   const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win.isDestroyed() || !win.__st) return;
+  stepAlpha(win, dir > 0 ? 1 : -1);
+});
+
+// 面板上的「不用记住这个站点」
+ipcMain.handle('vr-site-clear', () => {
+  const win = currentOverlay();
+  const key = siteKey(win ? win.__st.url : state.url);
+  if (key && state.sitePrefs[key]) {
+    delete state.sitePrefs[key];
+    log('site pref cleared: ' + key);
+    saveState();
+  }
+  notifyPanel();
+  return panelState();
+});
+
+ipcMain.on('vr-prefs-ask', (e) => {  const win = BrowserWindow.fromWebContents(e.sender);
   if (!win || win.isDestroyed()) return;
   try {
     win.webContents.send('vr-zoom', clamp(win.__st.zoom || 1, ZOOM_MIN, ZOOM_MAX));
@@ -1057,6 +1244,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  try { globalShortcut.unregisterAll(); } catch (_) {}
   clearInterval(barTimer);
   barTimer = null;
   if (tray && !tray.isDestroyed()) {

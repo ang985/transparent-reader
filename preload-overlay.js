@@ -284,9 +284,20 @@ function buildToolbar() {
     if (!e.relatedTarget && !e.toElement) setBarActive(false);
   }, true);
 
-  // 和浏览器一样：Ctrl + 滚轮缩放页面（Ctrl+0 复位，Ctrl + / - 也行）
+  // Ctrl + 滚轮：缩放页面（Ctrl+0 复位，Ctrl + / - 也行）
+  // Alt  + 滚轮：直接调背景浓度（上滚更浓、下滚更淡），不用去面板摸滑块
   let lastZoomAt = 0;
+  let lastAlphaAt = 0;
   window.addEventListener('wheel', (e) => {
+    if (e.altKey && !e.ctrlKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const now = Date.now();
+      if (now - lastAlphaAt < 40) return;
+      lastAlphaAt = now;
+      ipcRenderer.send('vr-alpha-step', e.deltaY < 0 ? 1 : -1);
+      return;
+    }
     if (!e.ctrlKey) return;
     e.preventDefault();
     e.stopPropagation();
@@ -317,6 +328,44 @@ function buildToolbar() {
 
   return true;
 }
+
+const PASS_BADGE_ID = 'vr-passthrough-badge';
+
+// 穿透状态下鼠标已经穿透给下层了，页面上必须有个显眼的提示，
+// 否则用户会以为"窗口卡死了、点不动"。
+function showPassBadge() {
+  if (!document.body) return;
+  let el = document.getElementById(PASS_BADGE_ID);
+  if (el) return;
+  el = document.createElement('div');
+  el.id = PASS_BADGE_ID;
+  const s = el.style;
+  s.setProperty('position', 'fixed', 'important');
+  s.setProperty('top', '36px', 'important');
+  s.setProperty('right', '8px', 'important');
+  s.setProperty('padding', '3px 8px', 'important');
+  s.setProperty('border-radius', '4px', 'important');
+  s.setProperty('background', 'rgba(176,42,42,0.92)', 'important');
+  s.setProperty('color', '#fff', 'important');
+  s.setProperty('font-family', '"Microsoft YaHei UI","Segoe UI",sans-serif', 'important');
+  s.setProperty('font-size', '11.5px', 'important');
+  s.setProperty('line-height', '1.5', 'important');
+  s.setProperty('pointer-events', 'none', 'important');
+  s.setProperty('z-index', '2147483647', 'important');
+  s.setProperty('box-shadow', '0 2px 8px rgba(0,0,0,.25)', 'important');
+  el.textContent = '穿透中 · 按 Alt+T 退出';
+  document.documentElement.appendChild(el);
+}
+
+function hidePassBadge() {
+  const el = document.getElementById(PASS_BADGE_ID);
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+ipcRenderer.on('vr-passthrough', (_e, on) => {
+  if (on) showPassBadge();
+  else hidePassBadge();
+});
 
 const BLANK_ID = 'vr-blank';
 

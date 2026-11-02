@@ -16,7 +16,10 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 
 - **Transparent reading layer** — page backgrounds are wiped out while text stays sharp and readable (with a subtle text-shadow halo), floating above other applications
 - **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
+- **Per-site memory** — each site remembers its own opacity and zoom; switch sites and the settings follow you
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
+- **`Alt` + wheel** — change background opacity right where you are, no trip to the panel
+- **Temporary click-through (`Alt+T`)** — the mouse falls through to the window below; press `Alt+T` again to come back. A red badge stays on screen while it is on
 - **Answer-sheet state detection** — on quiz sites (e.g. Fenbi) answer grids are colour-coded as correct / wrong / answered
 - **Collapse to a pill** — shrink the whole window into a small pill parked in a screen corner; double-click or hotkey to expand
 - **`Alt+Q` shortcut** — implemented on `before-input-event`, so it survives page navigation; no system-wide hotkey is registered
@@ -45,6 +48,8 @@ npm start
 |---|---|
 | `Alt+Q` | Collapse to the pill / expand again (while the overlay or the pill has focus) |
 | `Alt+P` | Summon the control panel from the overlay or the pill |
+| `Alt` + wheel | Background opacity: scroll up = more solid, down = more transparent |
+| `Alt+T` | Toggle temporary click-through (mouse reaches the window underneath) |
 | `Ctrl` + wheel | Zoom the page (the toolbar does not zoom) |
 | `Alt+←` / `Alt+→` | Go back / forward |
 
@@ -84,7 +89,10 @@ MIT
 
 - **透明阅读层**：网页背景被抹掉，文字保留清晰可读（带光晕描边），浮在其它应用之上
 - **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新。启动只开控制面板，点「打开」才出现阅读层（上次的网址已自动填好）
+- **按站点记忆**：每个网站单独记住自己的浓度和缩放，换站点自动套回来；面板上会标注“已单独记住 xxx”
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
+- **`Alt` + 滚轮**：就地调背景浓度（上滚更浓、下滚更淡），不用回面板
+- **临时穿透（`Alt+T`）**：鼠标直接落到下层窗口，再按一次还原；穿透期间右上角有红色角标提示
 - **答题卡状态识别**：刷题网站（如粉笔）答题卡按对 / 错 / 已答自动着色标识
 - **收起为小胶囊**：一键收成小胶囊挂在屏幕角落，双击或快捷键展开
 - **`Alt+Q` 快捷收起**：基于 `before-input-event` 实现，页面跳转不影响，不注册系统级热键
@@ -113,6 +121,8 @@ npm start
 |---|---|
 | `Alt+Q` | 收起为小胶囊 / 再按恢复（焦点在阅读层或胶囊上时） |
 | `Alt+P` | 从阅读层或胶囊唤出控制面板 |
+| `Alt` + 滚轮 | 调背景浓度：上滚更浓、下滚更淡 |
+| `Alt + T` | 临时穿透：鼠标点到下层窗口，再按一次退出 |
 | `Ctrl+滚轮` | 页面缩放（工具条不跟着缩放） |
 | `Alt+←` / `Alt+→` | 页面后退 / 前进 |
 
