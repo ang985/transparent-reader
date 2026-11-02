@@ -8,3 +8,13 @@ zt.log
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 运行状态与本机数据（不该入库）
+state.json
+*.bak
+card-dump.txt
+.vr-install.json
+
+# 打包产物
+dist/
+*.zip

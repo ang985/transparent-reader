@@ -9,18 +9,23 @@ if (process.env.VR_NO_GPU === '1') app.disableHardwareAcceleration();
 
 // 数据目录选取顺序：
 //   1. 环境变量 VR_DATA_DIR —— 想固定到某个位置时用
-//   2. 旧版本沿用的 E:\Tools\transparent-reader-data —— 本机升级时不丢页签状态
-//   3. 系统用户数据目录（Windows 下是 %APPDATA%\transparent-reader）
-// 这样别人 clone 下来零配置即可运行，也不会往他的盘上乱建目录。
-function resolveDataDir() {
-  if (process.env.VR_DATA_DIR) return process.env.VR_DATA_DIR;
-
-  const legacy = 'E:\\Tools\\transparent-reader-data';
+//   2. 本机提示文件 %APPDATA%/transparent-reader/data-dir.txt —— 老版本把数据
+//      放在别的盘时，写一行路径进去就接着用，省得在源码里写死某个目录
+//   3. 系统用户数据目录（Windows 下是 %APPDATA%/transparent-reader）
+// 这样别人拿到源码零配置即可运行，也不会往他的盘上乱建目录。
+function readDirHint() {
   try {
-    if (fs.existsSync(path.join(legacy, 'state.json'))) return legacy;
-  } catch (_) { /* 没有这个盘符，正常忽略 */ }
+    const hint = path.join(app.getPath('appData'), 'transparent-reader', 'data-dir.txt');
+    const dir = fs.readFileSync(hint, 'utf8').trim();
+    if (dir && fs.existsSync(path.join(dir, 'state.json'))) return dir;
+  } catch (_) { /* 没有提示文件，走默认位置 */ }
+  return '';
+}
 
-  return path.join(app.getPath('appData'), 'transparent-reader');
+function resolveDataDir() {
+  return process.env.VR_DATA_DIR
+    || readDirHint()
+    || path.join(app.getPath('appData'), 'transparent-reader');
 }
 
 const DATA_DIR = resolveDataDir();
@@ -49,7 +54,7 @@ const DEFAULT_STATE = {
   lockSize: true,  // 锁定窗口大小：关闭拖边缘缩放的感应区，避免抢滚动条时误拖
   zoom: 1,         // 页面缩放（Ctrl+滚轮），1 = 100%
   barAlways: false, // 顶部工具条是否常亮（不随鼠标淡出）
-  // 按站点记忆：{ "fenbi.com": { alpha: 0.14, zoom: 1.2 } }
+  // 按站点记忆：{ "example.com": { alpha: 0.14, zoom: 1.2 } }
   // 只存浓度和缩放；没记录的站点用上面的全局默认值。
   sitePrefs: {},
   // 蒙版主题：auto 按页面底色自动判断；light / dark 手动锁死（判断错时用）

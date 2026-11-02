@@ -42,6 +42,8 @@ npm start
 
 > **Windows only.** The launcher scripts (`.bat`, `.ps1`) and the window-transparency helper are Windows-specific.
 > Data is stored under `%APPDATA%\transparent-reader` unless you point `VR_DATA_DIR` somewhere else.
+> Coming from an older build that kept its data elsewhere? Put that absolute path in
+> `%APPDATA%\transparent-reader\data-dir.txt` and it will be used automatically.
 
 ### Shortcuts
 
@@ -116,6 +118,7 @@ npm start
 
 > **仅支持 Windows**：启动脚本（`.bat`、`.ps1`）与窗口透明化辅助脚本都是 Windows 专用。
 > 运行数据默认存放在 `%APPDATA%\transparent-reader`，可用 `VR_DATA_DIR` 指定到别处。
+> 老版本把数据放在别的盘时，把那个绝对路径写进 `%APPDATA%\transparent-reader\data-dir.txt`，程序会自动接着用。
 
 ### 快捷键
 
