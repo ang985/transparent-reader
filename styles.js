@@ -2,10 +2,14 @@
 
 function parts() {
   const base = `
-html, body { background-color: transparent !important; background-image: none !important; }
+html { background-color: transparent !important; background-image: none !important; }
 /* [data-vr-raw] 是 preload 认定的答题卡格子：它们的原始背景（纯色或背景图）
-   就是"答对/答错/已答"的载体，一旦被刷透明状态就全丢了，所以这里必须放行。 */
-body, body *:not(html):not(body):not([data-vr-raw]) { background-color: transparent !important; background-image: none !important; }
+   就是"答对/答错/已答"的载体，一旦被刷透明状态就全丢了，所以这里必须放行。
+   html:not(.vr-probe)：preload 判断"这页是深色还是浅色"时，会临时给自己加上
+   .vr-probe 让下面这条规则失效，从而读到页面**自己的**背景色。
+   整个过程是同步的（读到就摘掉），不会真的画出一帧原样页面。 */
+html:not(.vr-probe) body,
+html:not(.vr-probe) body *:not(html):not(body):not([data-vr-raw]) { background-color: transparent !important; background-image: none !important; }
 body, body * { text-shadow: var(--vr-shadow, 0 0 1px rgba(255,255,255,.95), 0 0 3px rgba(255,255,255,.8)) !important; }
 body, p, div, span, li, td, th, dd, dt, a, em, strong, b, i, u, h1, h2, h3, h4, h5, h6, pre, code, blockquote, label, button, input, textarea, select, small, time, cite {
   color: #16181d !important;
@@ -147,7 +151,53 @@ header, footer, nav, aside, [role="banner"], [role="navigation"], [role="complem
 [class*="recommend"], [class*="related"], [class*="comment"] { display: none !important; }
 `;
 
-  return { base: base + controls, images, focus };
+  // ---- 深色页面 ----
+  // 上面那套是为"白纸黑字"的浅色页写的：白蒙版 + 近黑文字。
+  // 深色页反过来（近黑背景 + 浅色字），照搬就会变成"黑字压黑底"。
+  // 这里给出同一套结构的暗色版本，由 html.vr-dark 这个类切换，
+  // 类名由 preload 根据页面底色判断后加上，不需要重新注入 CSS。
+  const dark = `
+html.vr-dark body, html.vr-dark p, html.vr-dark div, html.vr-dark span, html.vr-dark li,
+html.vr-dark td, html.vr-dark th, html.vr-dark dd, html.vr-dark dt, html.vr-dark em,
+html.vr-dark strong, html.vr-dark b, html.vr-dark i, html.vr-dark u, html.vr-dark pre,
+html.vr-dark code, html.vr-dark blockquote, html.vr-dark label, html.vr-dark small,
+html.vr-dark time, html.vr-dark cite { color: #e3e6eb !important; }
+html.vr-dark h1, html.vr-dark h2, html.vr-dark h3, html.vr-dark h4 { color: #ffffff !important; }
+html.vr-dark a, html.vr-dark a * { color: #7cb6ff !important; }
+html.vr-dark ::selection { background: rgba(124,182,255,.30) !important; }
+html.vr-dark ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,.20); }
+html.vr-dark ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,.34); }
+html.vr-dark ::-webkit-scrollbar-thumb:active { background-color: rgba(255,255,255,.46); }
+html.vr-dark ::-webkit-scrollbar-track { background: rgba(255,255,255,.04); }
+html.vr-dark ::-webkit-scrollbar-track:hover { background: rgba(255,255,255,.07); }
+html.vr-dark input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="range"]),
+html.vr-dark textarea, html.vr-dark select {
+  background-color: rgba(30,33,39,.94) !important;
+  border-color: rgba(255,255,255,.26) !important;
+  color: #e3e6eb !important;
+}
+html.vr-dark input[type="checkbox"], html.vr-dark input[type="radio"] {
+  background-color: #1c1f25 !important;
+  border-color: rgba(255,255,255,.50) !important;
+}
+html.vr-dark button, html.vr-dark [role="button"],
+html.vr-dark input[type="submit"], html.vr-dark input[type="button"] {
+  background-color: rgba(44,48,56,.92) !important;
+  border-color: rgba(255,255,255,.22) !important;
+  color: #e8eaee !important;
+}
+html.vr-dark body [data-vr-check] {
+  background-color: #1c1f25 !important;
+  border-color: rgba(255,255,255,.55) !important;
+}
+html.vr-dark body [data-vr-card] {
+  background-color: rgba(26,29,35,.975) !important;
+  border-color: rgba(255,255,255,.16) !important;
+  box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06) inset !important;
+}
+`;
+
+  return { base: base + controls, images, focus, dark };
 }
 
 function buildCSS(st) {
@@ -155,6 +205,8 @@ function buildCSS(st) {
   let css = p.base;
   if (st.hideImages) css += p.images;
   if (st.focus) css += p.focus;
+  // 暗色段一直带着：它只在 html.vr-dark 存在时生效，浅色页完全不受影响
+  css += p.dark;
   return css;
 }
 

@@ -52,6 +52,8 @@ const DEFAULT_STATE = {
   // 按站点记忆：{ "fenbi.com": { alpha: 0.14, zoom: 1.2 } }
   // 只存浓度和缩放；没记录的站点用上面的全局默认值。
   sitePrefs: {},
+  // 蒙版主题：auto 按页面底色自动判断；light / dark 手动锁死（判断错时用）
+  veilMode: 'auto',
 };
 
 let state = { ...DEFAULT_STATE };
@@ -242,7 +244,12 @@ function createOverlay(rawUrl, opts = {}) {
       sandbox: false,
       spellcheck: false,
       backgroundThrottling: false,
-      additionalArguments: ['--vr-alpha=' + state.alpha, '--vr-zoom=' + (state.zoom || 1), '--vr-bar-always=' + (state.barAlways ? '1' : '0')],
+      additionalArguments: [
+        '--vr-alpha=' + state.alpha,
+        '--vr-zoom=' + (state.zoom || 1),
+        '--vr-bar-always=' + (state.barAlways ? '1' : '0'),
+        '--vr-veil=' + (state.veilMode || 'auto'),
+      ],
     },
   });
 
@@ -254,6 +261,8 @@ function createOverlay(rawUrl, opts = {}) {
     id: ++winSeq,
     title: '',
     url,
+    dark: false,        // 当前页面是否按深色蒙版渲染（由 preload 上报）
+    eff: state.alpha,   // 实际生效浓度（深色页有下限，可能大于 alpha）
   };
   overlayWin = win;
 
@@ -494,6 +503,7 @@ function syncPagePrefs(win) {
     win.webContents.send('vr-zoom', z);
     win.webContents.send('vr-bar-always', !!state.barAlways);
     win.webContents.send('vr-alpha', win.__st.alpha);
+    win.webContents.send('vr-veil-mode', state.veilMode || 'auto');
   } catch (_) {}
 }
 
@@ -667,6 +677,9 @@ function panelState() {
     onTop: state.onTop !== false,
     lockSize: state.lockSize !== false,
     barAlways: !!state.barAlways,
+    veilMode: state.veilMode || 'auto',
+    dark: win ? !!win.__st.dark : false,
+    effAlpha: win ? (typeof win.__st.eff === 'number' ? win.__st.eff : win.__st.alpha) : state.alpha,
     hasOverlay: !!win,
     passthrough,
     // 当前站点的记忆值（null 表示这个站点还没单独记过）
@@ -779,6 +792,18 @@ ipcMain.handle('vr-open', (_e, url) => {
   return { ok: true };
 });
 
+// preload 识别出页面深浅后上报：面板据此说明"实际按 xx% 渲染"
+ipcMain.on('vr-theme', (e, info) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win.isDestroyed() || !win.__st || !info) return;
+  const dark = !!info.dark;
+  const eff = typeof info.eff === 'number' ? clamp(info.eff, ALPHA_MIN, ALPHA_MAX) : win.__st.alpha;
+  if (win.__st.dark === dark && win.__st.eff === eff) return;
+  win.__st.dark = dark;
+  win.__st.eff = eff;
+  notifyPanel();
+});
+
 ipcMain.handle('vr-state', () => panelState());
 
 ipcMain.handle('vr-history-drop', (_e, target) => {
@@ -822,6 +847,16 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
     }
     saveState();
     notifyPanel();
+    return { ok: true };
+  }
+  if (key === 'veilMode') {
+    state.veilMode = (val === 'light' || val === 'dark') ? val : 'auto';
+    if (win) {
+      try { win.webContents.send('vr-veil-mode', state.veilMode); } catch (_) {}
+    }
+    saveState();
+    notifyPanel();
+    log('veilMode=' + state.veilMode);
     return { ok: true };
   }
   if (key === 'lockSize') {

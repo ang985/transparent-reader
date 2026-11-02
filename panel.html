@@ -325,6 +325,17 @@
   }
   .site-note button:hover { color: #b02a2a; }
   .site-note[hidden] { display: none; }
+  .seg { display: flex; gap: 6px; margin-top: 10px; }
+  .seg button {
+    flex: 1; padding: 5px 0; font-size: 12px;
+    border: 1px solid var(--line-soft); background: #fff; color: #3a3f47;
+    border-radius: 6px; cursor: pointer;
+  }
+  .seg button:hover { border-color: rgba(11,78,162,.35); }
+  .seg button.on {
+    background: rgba(11,78,162,.10); border-color: rgba(11,78,162,.45);
+    color: #0b4ea2; font-weight: 600;
+  }
 
   .divider { height: 1px; background: var(--line-soft); margin: 13px -14px; }
 
@@ -467,10 +478,15 @@
         <b id="alphaVal">20%</b>
       </div>
       <input id="alpha" class="slider" type="range" min="0" max="92" step="2" value="20" />
-      <div class="hint">0% 只留文字几乎全透明；调高更像一张磨砂卡片，也更不容易被看清。</div>
+      <div class="hint" id="alphaHint">0% 只留文字几乎全透明；调高更像一张磨砂卡片，也更不容易被看清。</div>
       <div class="site-note" id="siteNote" hidden>
         <span id="siteText"></span>
         <button id="siteClear" type="button">不用记住</button>
+      </div>
+      <div class="seg" id="veilSeg">
+        <button type="button" data-veil="auto">蒙版跟随页面</button>
+        <button type="button" data-veil="light">强制浅色</button>
+        <button type="button" data-veil="dark">强制深色</button>
       </div>
 
       <div class="divider"></div>
@@ -664,9 +680,38 @@
     onTop.checked = s.onTop !== false;
     lockSize.checked = s.lockSize !== false;
     barAlways.checked = !!s.barAlways;
+    paintVeilSeg(s.veilMode || 'auto');
+    renderAlphaHint(s);
     renderSite(s.site);
     renderRecent(s.history);
   }
+
+  // 深色页面有浓度下限（0.55），滑块值不等于实际值时必须说清楚，
+  // 否则用户会觉得"我调到 20% 怎么还是这么实"。
+  function renderAlphaHint(s) {
+    const el = $('alphaHint');
+    if (!el) return;
+    const eff = typeof s.effAlpha === 'number' ? s.effAlpha : s.alpha;
+    if (s.dark && eff > (s.alpha || 0) + 0.011) {
+      el.textContent = '当前是深色页面：为保证浅色文字可读，实际按 '
+        + Math.round(eff * 100) + '% 渲染（想更透可以选下面的「强制浅色」）。';
+    } else {
+      el.textContent = '0% 只留文字几乎全透明；调高更像一张磨砂卡片，也更不容易被看清。';
+    }
+  }
+
+  function paintVeilSeg(mode) {
+    document.querySelectorAll('#veilSeg button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.veil === mode);
+    });
+  }
+
+  document.querySelectorAll('#veilSeg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      paintVeilSeg(b.dataset.veil);
+      window.vr.setOpt('veilMode', b.dataset.veil);
+    });
+  });
 
   const siteClearBtn = $('siteClear');
   if (siteClearBtn) {

@@ -17,6 +17,7 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 - **Transparent reading layer** — page backgrounds are wiped out while text stays sharp and readable (with a subtle text-shadow halo), floating above other applications
 - **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
 - **Per-site memory** — each site remembers its own opacity and zoom; switch sites and the settings follow you
+- **Dark pages adapted** — the page's own background is detected and the overlay flips to a dark veil with light text; opacity for dark pages is floored at 55% so light text stays readable, and the panel always shows the value actually used. You can also force light/dark from the panel
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
 - **`Alt` + wheel** — change background opacity right where you are, no trip to the panel
 - **Temporary click-through (`Alt+T`)** — the mouse falls through to the window below; press `Alt+T` again to come back. A red badge stays on screen while it is on
@@ -90,6 +91,7 @@ MIT
 - **透明阅读层**：网页背景被抹掉，文字保留清晰可读（带光晕描边），浮在其它应用之上
 - **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新。启动只开控制面板，点「打开」才出现阅读层（上次的网址已自动填好）
 - **按站点记忆**：每个网站单独记住自己的浓度和缩放，换站点自动套回来；面板上会标注“已单独记住 xxx”
+- **深色页面自动适配**：识别页面自己的底色，深色站点自动切成深色蒙版 + 浅色文字；深色页浓度最低按 55% 渲染（否则浅字浮在浅底上看不清），面板会如实写明实际值，也可手动「强制浅色 / 强制深色」
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
 - **`Alt` + 滚轮**：就地调背景浓度（上滚更浓、下滚更淡），不用回面板
 - **临时穿透（`Alt+T`）**：鼠标直接落到下层窗口，再按一次还原；穿透期间右上角有红色角标提示

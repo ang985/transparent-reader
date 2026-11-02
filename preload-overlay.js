@@ -10,6 +10,16 @@ function readAlphaFromArgv() {
 
 let veil = readAlphaFromArgv();
 
+// 蒙版主题：auto = 按页面底色自动判断；light / dark = 面板里手动锁死
+function readVeilModeFromArgv() {
+  const hit = process.argv.find((a) => a.startsWith('--vr-veil='));
+  const v = hit ? hit.split('=')[1] : 'auto';
+  return (v === 'light' || v === 'dark') ? v : 'auto';
+}
+
+let veilMode = readVeilModeFromArgv();
+let veilDark = false;
+
 function readZoomFromArgv() {
   const hit = process.argv.find((a) => a.startsWith('--vr-zoom='));
   const v = hit ? parseFloat(hit.split('=')[1]) : 1;
@@ -61,17 +71,35 @@ function paintBarOpacity() {
   bar.style.setProperty('opacity', (barAlways || barHover) ? '1' : BAR_IDLE_OPACITY, 'important');
 }
 
+// 深色页面需要一个浓度下限。
+// 原因：窗口是透明的，页面自己的背景被抹掉了，真正"垫在下面"的是用户身后那个程序。
+// 浅色文字一旦遇到浅色底（比如背后是白色编辑器），20%~30% 的深色蒙版根本压不住，
+// 字就变成"灰字浮灰底"。60% 是在白色背景下也能稳住对比度的下限。
+// 想回到白底黑字，在面板里选「强制浅色」即可。
+const DARK_MIN_VEIL = 0.55;
+
+function effectiveVeil() {
+  return veilDark ? Math.max(veil, DARK_MIN_VEIL) : veil;
+}
+
 function veilColor() {
-  return `rgba(255,255,255,${veil.toFixed(3)})`;
+  // 深色页用近黑蒙版：白色蒙版会让浅色文字彻底糊掉
+  const rgb = veilDark ? '18,20,25' : '255,255,255';
+  return `rgba(${rgb},${effectiveVeil().toFixed(3)})`;
 }
 
 // 文字光晕要跟着背景浓度走：
 //   浓度低（背景近乎透明）→ 需要一圈紧实的白边，字才不会被底下的深色吃掉
 //   浓度高（底已经是白纸）→ 光晕必须收掉，否则字边缘发糊、反而看不清
 function shadowFor(v) {
-  const a = Math.max(0, Math.min(1, 1 - v / 0.6));
+  let a = Math.max(0, Math.min(1, 1 - v / 0.6));
+  // 深色页：底子可能是浅的（背后是白色编辑器），浅字全靠这圈暗边托住，
+  // 所以光晕要明显更强；浅色页维持原来的强度即可。
+  if (veilDark) a = Math.min(1, a * 1.5);
   if (a <= 0.03) return 'none';
-  const t = (x) => `rgba(255,255,255,${Math.min(1, x).toFixed(2)})`;
+  // 光晕要和文字反着来：浅色页用白边托黑字，深色页用暗边托亮字
+  const rgb = veilDark ? '8,10,14' : '255,255,255';
+  const t = (x) => `rgba(${rgb},${Math.min(1, x).toFixed(2)})`;
   return [
     `0 0 1px ${t(a)}`,
     `0 0 1px ${t(a)}`,
@@ -83,13 +111,97 @@ function shadowFor(v) {
 function paintRoot() {
   const de = document.documentElement;
   if (!de) return false;
+  de.classList.toggle('vr-dark', veilDark);
   de.style.setProperty('background-color', veilColor(), 'important');
-  de.style.setProperty('color-scheme', 'light', 'important');
-  de.style.setProperty('--vr-shadow', shadowFor(veil));
+  // color-scheme 跟着蒙版走：原生下拉、滚动条、表单控件才会用同一套配色
+  de.style.setProperty('color-scheme', veilDark ? 'dark' : 'light', 'important');
+  de.style.setProperty('--vr-shadow', shadowFor(effectiveVeil()));
   if (document.body) {
     document.body.style.setProperty('background-color', 'transparent', 'important');
   }
   return !!document.body;
+}
+
+// ---------------- 深色页面识别 ----------------
+// 难点：注入的 CSS 把所有背景都刷成了 transparent，页面自己的底色已经读不到了。
+// 办法是临时给 <html> 加 .vr-probe —— styles.js 里那条"强制透明"规则写成
+// html:not(.vr-probe) ...，一类名消失规则就不生效，于是 getComputedStyle 又能
+// 读到页面**原本的**背景色。整个过程是同步的（读到就摘掉），中间不会绘制。
+
+function parseRGB(str) {
+  const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.%]+))?/i.exec(str || '');
+  if (!m) return null;
+  let a = 1;
+  if (m[4] != null) a = m[4].indexOf('%') >= 0 ? parseFloat(m[4]) / 100 : parseFloat(m[4]);
+  return { r: +m[1], g: +m[2], b: +m[3], a: isFinite(a) ? a : 1 };
+}
+
+function relLum(c) {
+  const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+}
+
+function probePageBg() {
+  const de = document.documentElement;
+  if (!de || !document.body) return null;
+  const prev = de.style.getPropertyValue('background-color');
+  const prio = de.style.getPropertyPriority('background-color');
+  try {
+    de.classList.add('vr-probe');
+    de.style.removeProperty('background-color');
+    for (const el of [document.body, de]) {
+      const c = parseRGB(getComputedStyle(el).backgroundColor);
+      if (c && c.a > 0.2) return c;
+    }
+    // 很常见的"页面自己没设底色"：退一步看光标附近的大块容器
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const pts = [[vw * 0.5, vh * 0.3], [vw * 0.2, vh * 0.7], [vw * 0.8, vh * 0.6]];
+    for (const pt of pts) {
+      let node = document.elementFromPoint(Math.round(pt[0]), Math.round(pt[1]));
+      let guard = 0;
+      while (node && node !== de && guard < 6) {
+        const c = parseRGB(getComputedStyle(node).backgroundColor);
+        if (c && c.a > 0.5) return c;
+        node = node.parentElement;
+        guard += 1;
+      }
+    }
+    return null;
+  } catch (_) {
+    return null;
+  } finally {
+    de.classList.remove('vr-probe');
+    if (prev) de.style.setProperty('background-color', prev, prio || 'important');
+  }
+}
+
+function detectDark() {
+  if (veilMode === 'dark') return true;
+  if (veilMode === 'light') return false;
+  const c = probePageBg();
+  if (c) return relLum(c) < 0.42;
+  // 读不到底色时退一步看页面声明的配色倾向
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  const cs = (meta && meta.getAttribute('content')) || '';
+  if (/dark/i.test(cs) && !/light/i.test(cs)) return true;
+  return false;
+}
+
+function reportTheme() {
+  try {
+    ipcRenderer.send('vr-theme', { dark: veilDark, eff: effectiveVeil() });
+  } catch (_) { /* ignore */ }
+}
+
+// 切换主题只需要重涂根节点：CSS 那边靠 html.vr-dark 类整体换色，不用重新注入
+function applyTheme() {
+  if (!document.documentElement) return;
+  const want = detectDark();
+  if (want === veilDark) return;
+  veilDark = want;
+  paintRoot();
+  reportTheme();
 }
 
 // 顶部留白该加在哪一层，取决于页面的滚动结构（详见 styles.js 里的注释）。
@@ -1146,6 +1258,10 @@ function scanOverlays() {
 function boot() {
   const ok = paintRoot() && buildFrame() && buildToolbar();
   if (ok) {
+    applyTheme();
+    reportTheme();
+  }
+  if (ok) {
     scanOverlays();
     decidePad();
   }
@@ -1172,6 +1288,8 @@ setInterval(() => {
   tidyTick += 1;
   if (tidyTick % 2 === 0) decidePad();      // SPA 换路由后滚动结构会变
   if (tidyTick % 3 === 0) tidyOverflowX();
+  // 每 5 个 tick（约 6 秒）复查一次深浅：SPA 换页、切主题都会让底色变
+  if (tidyTick % 5 === 0) applyTheme();
 }, 1200);
 
 window.addEventListener('resize', () => {
@@ -1182,6 +1300,18 @@ window.addEventListener('resize', () => {
 ipcRenderer.on('vr-alpha', (_e, v) => {
   if (typeof v === 'number' && isFinite(v)) {
     veil = Math.min(0.92, Math.max(0, v));
+    paintRoot();
+    reportTheme();   // 深色页有下限，实际值可能和滑块不同，要让面板知道
+  }
+});
+
+ipcRenderer.on('vr-veil-mode', (_e, mode) => {
+  veilMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+  const want = detectDark();
+  if (want !== veilDark) {
+    veilDark = want;
+    paintRoot();
+  } else if (veilMode !== 'auto') {
     paintRoot();
   }
 });
