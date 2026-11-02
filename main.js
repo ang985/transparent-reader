@@ -3,7 +3,7 @@
 const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { buildCSS } = require('./styles');
+const { buildCSS, buildDarkCSS } = require('./styles');
 
 if (process.env.VR_NO_GPU === '1') app.disableHardwareAcceleration();
 
@@ -153,6 +153,35 @@ function saveStateDebounced() {
   saveTimer = setTimeout(() => saveState(), 400);
 }
 
+// 暗色配色是一张独立样式表：页面判定为深色就插进去，浅色就摘掉。
+// 用 insertCSS 而不是往 <html> 挂类名 —— 洛谷这类 SPA 会整体重写
+// documentElement.className，类名一被抹掉，深色配色就集体失效，
+// 只剩深色蒙版压着浅色页的深色文字，屏幕上就是一坨糊。
+let darkSeq = 0;
+async function setDarkSheet(win, on) {
+  if (!win || win.isDestroyed()) return;
+  const tag = ++darkSeq;
+  if (on) {
+    if (win.__darkKey) return;
+    try {
+      const key = await win.webContents.insertCSS(buildDarkCSS());
+      if (tag !== darkSeq || win.isDestroyed()) {
+        try { win.webContents.removeInsertedCSS(key); } catch (_) {}
+        return;
+      }
+      win.__darkKey = key;
+    } catch (e) {
+      log('insert dark CSS failed: ' + e.message);
+    }
+    return;
+  }
+  const key = win.__darkKey;
+  win.__darkKey = null;
+  if (key) {
+    try { await win.webContents.removeInsertedCSS(key); } catch (_) {}
+  }
+}
+
 async function applyCSS(win) {
   if (!win || win.isDestroyed()) return;
   const css = buildCSS(win.__st);
@@ -161,6 +190,9 @@ async function applyCSS(win) {
       try { win.webContents.removeInsertedCSS(win.__cssKey); } catch (_) { /* stale key after navigation */ }
     }
     win.__cssKey = await win.webContents.insertCSS(css);
+    // 导航后旧文档里的样式表已经没了，key 全部作废，按当前判定重插
+    win.__darkKey = null;
+    if (win.__st.dark) await setDarkSheet(win, true);
   } catch (e) {
     log('insertCSS failed: ' + e.message);
   }
@@ -798,9 +830,15 @@ ipcMain.on('vr-theme', (e, info) => {
   if (!win || win.isDestroyed() || !win.__st || !info) return;
   const dark = !!info.dark;
   const eff = typeof info.eff === 'number' ? clamp(info.eff, ALPHA_MIN, ALPHA_MAX) : win.__st.alpha;
+  if (info.diag) log('theme diag: ' + JSON.stringify(info.diag));
   if (win.__st.dark === dark && win.__st.eff === eff) return;
+  const flipped = win.__st.dark !== dark;
   win.__st.dark = dark;
   win.__st.eff = eff;
+  if (flipped) {
+    setDarkSheet(win, dark);
+    log('dark sheet ' + (dark ? 'on' : 'off'));
+  }
   notifyPanel();
 });
 

@@ -91,31 +91,65 @@ function veilColor() {
 // 文字光晕要跟着背景浓度走：
 //   浓度低（背景近乎透明）→ 需要一圈紧实的白边，字才不会被底下的深色吃掉
 //   浓度高（底已经是白纸）→ 光晕必须收掉，否则字边缘发糊、反而看不清
+// 注意：这里直接用逗号拼 —— 它是写进 CSS 的值，用竖线之类好看的分隔符
+// 会让整条 text-shadow 声明变成非法值被浏览器丢弃，
+// 于是退回基础表里的白色 fallback，屏幕上就是"亮边糊字"。
+function formatShadow(list) {
+  return (list || []).map((x) => String(x).trim()).join(', ');
+}
+
 function shadowFor(v) {
-  let a = Math.max(0, Math.min(1, 1 - v / 0.6));
-  // 深色页：底子可能是浅的（背后是白色编辑器），浅字全靠这圈暗边托住，
-  // 所以光晕要明显更强；浅色页维持原来的强度即可。
-  if (veilDark) a = Math.min(1, a * 1.5);
-  if (a <= 0.03) return 'none';
+  const a = Math.max(0, Math.min(1, 1 - v / 0.6));
+  if (a <= 0.03) return ['none'];
   // 光晕要和文字反着来：浅色页用白边托黑字，深色页用暗边托亮字
   const rgb = veilDark ? '8,10,14' : '255,255,255';
   const t = (x) => `rgba(${rgb},${Math.min(1, x).toFixed(2)})`;
+  if (veilDark) {
+    // 深色页要的是"紧实的暗边"，不是柔光。半径一大（原来 6px），
+    // 笔画边缘就化成一团，正是用户说的"字发糊"。
+    const ring = Math.min(1, 0.34 + a * 1.4);
+    return [
+      `0 0 1px ${t(ring)}`,
+      `0 0 1px ${t(ring)}`,
+      `0 0 2px ${t(a * 0.8)}`
+    ];
+  }
   return [
     `0 0 1px ${t(a)}`,
     `0 0 1px ${t(a)}`,
     `0 0 2.5px ${t(a * 0.92)}`,
     `0 0 6px ${t(a * 0.62)}`
-  ].join(', ');
+  ];
+}
+
+// 蒙版和描边以前写在 <html> 的 inline style 上（背景色 / color-scheme / --vr-shadow）。
+// 这很脆：不少站点会整体重写 documentElement 的 class 或 style，一重写就全丢 ——
+// 蒙版没了、--vr-shadow 掉了退回基础表里的**白色** fallback，
+// 于是屏幕上出现"亮边糊字"，正是用户报的那个现象。
+// 改成往 <head> 里放一个自己的 <style>：选择器用 :root（0,1,0）压过基础表的
+// html（0,0,1），而且页面脚本删不掉、也不会被 className 改写波及。
+function rootStyleEl() {
+  const de = document.documentElement;
+  if (!de) return null;
+  let el = document.getElementById('vr-root');
+  if (!el || !el.isConnected) {
+    el = document.createElement('style');
+    el.id = 'vr-root';
+    (document.head || de).appendChild(el);
+  }
+  return el;
 }
 
 function paintRoot() {
   const de = document.documentElement;
   if (!de) return false;
-  de.classList.toggle('vr-dark', veilDark);
-  de.style.setProperty('background-color', veilColor(), 'important');
-  // color-scheme 跟着蒙版走：原生下拉、滚动条、表单控件才会用同一套配色
-  de.style.setProperty('color-scheme', veilDark ? 'dark' : 'light', 'important');
-  de.style.setProperty('--vr-shadow', shadowFor(effectiveVeil()));
+  const el = rootStyleEl();
+  if (!el) return false;
+  // :not(.vr-probe) —— 探测页面自身底色时先让这条失效，否则读到的永远是我们自己的蒙版
+  el.textContent =
+    ':root:not(.vr-probe){background-color:' + veilColor() + ' !important;'
+    + 'color-scheme:' + (veilDark ? 'dark' : 'light') + ' !important;}'
+    + ':root body,:root body *{text-shadow:' + formatShadow(shadowFor(effectiveVeil())) + ' !important;}';
   if (document.body) {
     document.body.style.setProperty('background-color', 'transparent', 'important');
   }
@@ -144,11 +178,11 @@ function relLum(c) {
 function probePageBg() {
   const de = document.documentElement;
   if (!de || !document.body) return null;
-  const prev = de.style.getPropertyValue('background-color');
-  const prio = de.style.getPropertyPriority('background-color');
   try {
+    // 加 .vr-probe 让 #vr-root 里那条 :root:not(.vr-probe) 失效，
+    // body 自己的 inline 透明也要摘掉，否则读到的永远是我们刷的透明
     de.classList.add('vr-probe');
-    de.style.removeProperty('background-color');
+    document.body.style.removeProperty('background-color');
     for (const el of [document.body, de]) {
       const c = parseRGB(getComputedStyle(el).backgroundColor);
       if (c && c.a > 0.2) return c;
@@ -172,7 +206,7 @@ function probePageBg() {
     return null;
   } finally {
     de.classList.remove('vr-probe');
-    if (prev) de.style.setProperty('background-color', prev, prio || 'important');
+    document.body.style.setProperty('background-color', 'transparent', 'important');
   }
 }
 
@@ -190,11 +224,41 @@ function detectDark() {
 
 function reportTheme() {
   try {
-    ipcRenderer.send('vr-theme', { dark: veilDark, eff: effectiveVeil() });
+    const info = { dark: veilDark, eff: effectiveVeil() };
+    if (process.env.VR_DIAG === '1') {
+      // 诊断用：把真正生效的阴影、底色、以及"文字被染透明"的元素数一并带出去
+      const de = document.documentElement;
+      const sample = Array.from(document.querySelectorAll('a,h1,h2,h3,h4,p,span,li,td,strong,b'))
+        .slice(0, 1200);
+      let hollow = 0;
+      let sampleColor = '';
+      let sampleShadow = '';
+      for (const el of sample) {
+        const cs = getComputedStyle(el);
+        const fc = cs.webkitTextFillColor || '';
+        const m = /rgba?\(([^)]+)\)/.exec(fc);
+        const alpha = m ? (m[1].split(',')[3] != null ? parseFloat(m[1].split(',')[3]) : 1) : 1;
+        if (alpha < 0.05) hollow += 1;
+        if (!sampleColor && el.textContent && el.textContent.trim().length > 2) {
+          sampleColor = el.tagName + ' color=' + cs.color + ' fill=' + fc;
+          sampleShadow = cs.textShadow;
+        }
+      }
+      info.diag = {
+        stat: formatShadow(shadowFor(effectiveVeil())),
+        htmlBg: de ? getComputedStyle(de).backgroundColor : '',
+        cls: de ? de.className : '',
+        mode: veilMode,
+        hollow: hollow + '/' + sample.length,
+        sample: sampleColor,
+        sampleShadow: sampleShadow,
+      };
+    }
+    ipcRenderer.send('vr-theme', info);
   } catch (_) { /* ignore */ }
 }
 
-// 切换主题只需要重涂根节点：CSS 那边靠 html.vr-dark 类整体换色，不用重新注入
+// 切换主题只需要重涂根节点：配色那边由主进程插/摘暗色样式表，这里只管蒙版与描边
 function applyTheme() {
   if (!document.documentElement) return;
   const want = detectDark();
@@ -1286,6 +1350,7 @@ setInterval(() => {
   if (document.hidden) return;
   scanOverlays();
   tidyTick += 1;
+  if (!document.getElementById('vr-root')) paintRoot();   // 被页面重渲染清掉就补回来
   if (tidyTick % 2 === 0) decidePad();      // SPA 换路由后滚动结构会变
   if (tidyTick % 3 === 0) tidyOverflowX();
   // 每 5 个 tick（约 6 秒）复查一次深浅：SPA 换页、切主题都会让底色变
