@@ -251,6 +251,12 @@ function reportTheme() {
         mode: veilMode,
         hollow: hollow + '/' + sample.length,
         sample: sampleColor,
+        // 下面几项是用来区分"文字淡"到底是哪一层的锅：
+        //   bodyColor 还是浅色 → 基础配色表没插进来（或权重输了）
+        //   sheets 数量异常     → insertCSS 没成功 / 被导航清掉了
+        bodyColor: document.body ? getComputedStyle(document.body).color : '',
+        bodyBg: document.body ? getComputedStyle(document.body).backgroundColor : '',
+        sheets: document.styleSheets.length,
         sampleShadow: sampleShadow,
       };
     }
@@ -262,7 +268,13 @@ function reportTheme() {
 function applyTheme() {
   if (!document.documentElement) return;
   const want = detectDark();
-  if (want === veilDark) return;
+  if (want === veilDark) {
+    // 强制模式下每轮都上报一次，让主进程的 dark/eff 与页面实际状态对齐。
+    // 主进程那边有去重，重复上报不会反复插表；这条是兜底：
+    // 任何一次漏报都会让"暗色表该摘没摘"，屏幕上就是白蒙版压着近白文字。
+    if (veilMode !== 'auto') reportTheme();
+    return;
+  }
   veilDark = want;
   paintRoot();
   reportTheme();
@@ -1372,13 +1384,14 @@ ipcRenderer.on('vr-alpha', (_e, v) => {
 
 ipcRenderer.on('vr-veil-mode', (_e, mode) => {
   veilMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
-  const want = detectDark();
-  if (want !== veilDark) {
-    veilDark = want;
-    paintRoot();
-  } else if (veilMode !== 'auto') {
-    paintRoot();
-  }
+  veilDark = detectDark();
+  paintRoot();
+  // 这里必须上报。主进程靠 vr-theme 决定"插/摘暗色样式表"，
+  // 以前只在 veilDark 变化时 paintRoot、且完全不 reportTheme，
+  // 于是从"自动/强制深色"切到"强制浅色"时：白蒙版披上了，
+  // 暗色配色表还挂着（文字仍是 #e3e6eb 的近白色），
+  // 屏幕上就是白底上的浅灰字 —— 用户说的"强制浅色后字变得很淡"。
+  reportTheme();
 });
 
 ipcRenderer.on('vr-bar-always', (_e, on) => {

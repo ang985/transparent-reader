@@ -163,7 +163,9 @@ function saveStateDebounced() {
 // documentElement.className，类名一被抹掉，深色配色就集体失效，
 // 只剩深色蒙版压着浅色页的深色文字，屏幕上就是一坨糊。
 let darkSeq = 0;
-async function setDarkSheet(win, on) {
+// quiet：由 applyCSS 内部调用时为 true —— 那时候"没有 key"是正常的（新文档还没插过），
+// 不该往日志里刷告警。只有面板切换触发的摘除没有 key，才是真问题。
+async function setDarkSheet(win, on, quiet) {
   if (!win || win.isDestroyed()) return;
   const tag = ++darkSeq;
   if (on) {
@@ -183,20 +185,44 @@ async function setDarkSheet(win, on) {
   const key = win.__darkKey;
   win.__darkKey = null;
   if (key) {
-    try { await win.webContents.removeInsertedCSS(key); } catch (_) {}
+    try {
+      await win.webContents.removeInsertedCSS(key);
+      if (!quiet) log('dark CSS removed');
+    } catch (e) {
+      log('remove dark CSS failed: ' + e.message);
+    }
+  } else if (!quiet) {
+    // 没有 key 却要求摘除：暗色配色会一直压在浅色蒙版底下，字就是近白色，必须留痕。
+    log('dark CSS key missing (nothing to remove)');
   }
 }
 
+let cssSeq = 0;
+
 async function applyCSS(win) {
   if (!win || win.isDestroyed()) return;
+  const tag = ++cssSeq;
   const css = buildCSS(win.__st);
   try {
     if (win.__cssKey) {
-      try { win.webContents.removeInsertedCSS(win.__cssKey); } catch (_) { /* stale key after navigation */ }
+      const oldKey = win.__cssKey;
+      win.__cssKey = null;
+      try { await win.webContents.removeInsertedCSS(oldKey); } catch (_) { /* stale key after navigation */ }
     }
-    win.__cssKey = await win.webContents.insertCSS(css);
-    // 导航后旧文档里的样式表已经没了，key 全部作废，按当前判定重插
-    win.__darkKey = null;
+    // 关键：重插基础表之前，必须先把旧暗表**真正移除**。
+    // 以前这里只写了 win.__darkKey = null，样式表本身还挂在文档上，
+    // 于是每次 dom-ready / did-finish-load 都会漏下一张摘不掉的孤儿暗表：
+    //   auto 模式启动 → 插暗表(K1) → did-finish-load 再 applyCSS
+    //   → key 被清空但 K1 还在 → 重插暗表(K2)
+    //   → 用户切「强制浅色」时只摘掉了 K2，K1 让文字一直停在 #e3e6eb
+    // 屏幕上就是"白蒙版 + 近白字"，也就是用户报的"强制浅色后字很淡"。
+    await setDarkSheet(win, false, true);
+    const newKey = await win.webContents.insertCSS(css);
+    if (tag !== cssSeq || win.isDestroyed()) {
+      try { await win.webContents.removeInsertedCSS(newKey); } catch (_) {}
+      return;
+    }
+    win.__cssKey = newKey;
     if (win.__st.dark) await setDarkSheet(win, true);
   } catch (e) {
     log('insertCSS failed: ' + e.message);
@@ -622,6 +648,21 @@ function setAlpha(win, v) {
   notifyPanel();
 }
 
+// 蒙版模式：auto（跟页面底色）/ light（强制浅色）/ dark（强制深色）
+// 抽成函数是因为面板 IPC 和命令行都要走同一条路径，
+// 少一处分支就少一处"改了模式但页面没跟上"的坑。
+function setVeilMode(val) {
+  state.veilMode = (val === 'light' || val === 'dark') ? val : 'auto';
+  const win = currentOverlay();
+  if (win && !win.isDestroyed()) {
+    try { win.webContents.send('vr-veil-mode', state.veilMode); } catch (_) {}
+  }
+  saveState();
+  notifyPanel();
+  log('veilMode=' + state.veilMode);
+  return state.veilMode;
+}
+
 // Alt+滚轮：直接调浓度，不用先摸到面板里的滑块
 function stepAlpha(win, dir) {
   if (!win || win.isDestroyed()) return;
@@ -893,13 +934,7 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
     return { ok: true };
   }
   if (key === 'veilMode') {
-    state.veilMode = (val === 'light' || val === 'dark') ? val : 'auto';
-    if (win) {
-      try { win.webContents.send('vr-veil-mode', state.veilMode); } catch (_) {}
-    }
-    saveState();
-    notifyPanel();
-    log('veilMode=' + state.veilMode);
+    setVeilMode(val);
     return { ok: true };
   }
   if (key === 'lockSize') {
@@ -1261,11 +1296,19 @@ if (!gotTheLock) {
     }
     // 命令行换页面：electron . --vr-open=https://example.com
     // 走的就是面板「打开」那条路径 —— 已有阅读层就原地跳转，不会再开一个窗口。
+    // 顺带支持 --vr-veil=auto|light|dark：运行时切蒙版模式，
+    // 自动化验证和"脚本一键换渲染方式"都靠它，不用去点面板。
     const openArg = Array.isArray(argv) ? argv.find((a) => /^--vr-open=/.test(a)) : null;
+    const veilArg = Array.isArray(argv) ? argv.find((a) => /^--vr-veil=/.test(a)) : null;
     if (openArg) {
       const target = openArg.slice('--vr-open='.length);
       log('open requested by command line: ' + target.slice(0, 60));
       createOverlay(target);
+      if (veilArg) setVeilMode(veilArg.slice('--vr-veil='.length));
+      return;
+    }
+    if (veilArg) {
+      setVeilMode(veilArg.slice('--vr-veil='.length));
       return;
     }
     log('second launch detected, reusing the running instance');
