@@ -371,6 +371,31 @@
   .toggle input:checked + i::after { transform: translateX(16px); }
   .toggle input:focus-visible + i { box-shadow: 0 0 0 3px rgba(37,99,235,.2); }
 
+  /* ---------- 全局热键 ---------- */
+  .hotkey-row { display: flex; align-items: center; gap: 10px; padding: 2px 0 2px; }
+  .hotkey {
+    flex: 1; height: 34px; font: inherit; font-size: 13px; font-weight: 600;
+    color: #0b4ea2; background: rgba(11,78,162,.07);
+    border: 1px dashed rgba(11,78,162,.35); border-radius: 7px;
+    cursor: pointer; letter-spacing: .4px;
+  }
+  .hotkey:hover { background: rgba(11,78,162,.13); }
+  .hotkey.rec {
+    color: #b45309; border-style: solid;
+    border-color: rgba(180,83,9,.55); background: rgba(245,158,11,.14);
+  }
+  .hotkey.bad {
+    color: #b42318; border-color: rgba(180,35,24,.45); background: rgba(180,35,24,.07);
+  }
+  .hotkey:disabled { opacity: .45; cursor: not-allowed; }
+  .linkbtn {
+    flex: 0 0 auto; background: none; border: 0; padding: 4px 2px;
+    color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .linkbtn:hover { color: #0b4ea2; }
+  .hint.ok { color: #0f7b3f; }
+  .hint.err { color: #b42318; }
+
   /* ---------- 操作说明 ---------- */
   .tips-card { padding: 0; }
   .tips-card > summary {
@@ -530,6 +555,20 @@
         </div>
         <label class="toggle"><input id="barAlways" type="checkbox" /><i></i></label>
       </div>
+
+      <div class="switch">
+        <div class="txt">
+          <span>全局唤出热键</span>
+          <small>被别的程序盖住时，按一下把浮层提到最前并聚焦（全局生效）</small>
+        </div>
+        <label class="toggle"><input id="summonEnabled" type="checkbox" checked /><i></i></label>
+      </div>
+
+      <div class="hotkey-row">
+        <button id="summonKey" class="hotkey" type="button" title="点击后直接按下新的组合键">Alt + R</button>
+        <button id="summonReset" class="linkbtn" type="button">恢复默认</button>
+      </div>
+      <div class="hint" id="summonHint"></div>
     </section>
 
     <details class="card tips-card">
@@ -546,6 +585,7 @@
         <li><kbd>Alt + P</kbd><span>在阅读层 / 胶囊上唤出这个控制面板</span></li>
         <li><kbd>Alt + 滚轮</kbd><span>直接调背景浓度（上滚更浓、下滚更淡），不用回面板拖滑块</span></li>
         <li><kbd>Alt + T</kbd><span>临时穿透：鼠标可以直接点到下层窗口，再按一次 Alt+T 退出</span></li>
+        <li><kbd>全局唤出</kbd><span>默认 Alt + R：窗口被别的程序盖住、或压根没焦点时，按一下把它提到最前并聚焦。可在上面的设置区改键或关掉</span></li>
         <li><kbd>按站点记忆</kbd><span>每个网站单独记住自己的浓度和缩放，切站点自动切回来</span></li>
         <li><kbd>Alt + ← / →</kbd><span>后退 / 前进</span></li>
         <li><kbd>Alt + 拖动</kbd><span>在页面任意位置整体挪动窗口</span></li>
@@ -575,6 +615,10 @@
   const lockSize = $('lockSize');
   const barAlways = $('barAlways');
   const focus = $('focus');
+  const summonEnabled = $('summonEnabled');
+  const summonKey = $('summonKey');
+  const summonReset = $('summonReset');
+  const summonHint = $('summonHint');
   const status = $('status');
   const recentBox = $('recentBox');
   const recentList = $('recentList');
@@ -681,6 +725,7 @@
     lockSize.checked = s.lockSize !== false;
     barAlways.checked = !!s.barAlways;
     paintVeilSeg(s.veilMode || 'auto');
+    renderSummon(s);
     renderAlphaHint(s);
     renderSite(s.site);
     renderRecent(s.history);
@@ -705,6 +750,139 @@
       b.classList.toggle('on', b.dataset.veil === mode);
     });
   }
+
+  // ---------------- 全局唤出热键 ----------------
+  // 交互就一条：点一下按钮进入"录制"，然后直接把组合键按出来。
+  // 不用下拉框拼修饰键 —— 那样既要维护一份键位表，又容易拼出系统不允许的组合。
+  let recSummon = false;
+  let summonCur = 'Alt+R';
+
+  function accelLabel(a) { return String(a || '').split('+').join(' + '); }
+
+  function hintTo(text, tone) {
+    if (!summonHint) return;
+    summonHint.textContent = text || '';
+    summonHint.className = 'hint' + (tone ? ' ' + tone : '');
+  }
+
+  // 从 KeyboardEvent 还原 Electron accelerator 里的键名。
+  // 用 e.code 而不是 e.key：中文输入法/大小写会让 e.key 变成 'R' / 'ｒ' / Process，
+  // 而 code 始终是物理键位（KeyR）。
+  const CODE_KEY = {
+    Space: 'Space', Tab: 'Tab', Enter: 'Enter', Backspace: 'Backspace',
+    Delete: 'Delete', Insert: 'Insert', Home: 'Home', End: 'End',
+    PageUp: 'PageUp', PageDown: 'PageDown',
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  };
+
+  function keyFromEvent(e) {
+    const c = e.code || '';
+    if (/^Key[A-Z]$/.test(c)) return c.slice(3);
+    if (/^Digit[0-9]$/.test(c)) return c.slice(5);
+    if (/^F([1-9]|1\d|2[0-4])$/.test(c)) return c;
+    if (CODE_KEY[c]) return CODE_KEY[c];
+    if (e.key && e.key.length === 1 && /[a-zA-Z0-9]/.test(e.key)) return e.key.toUpperCase();
+    return '';
+  }
+
+  // 顺序必须和主进程 normAccel 一致，否则同一个键会来回跳成两种写法
+  function accelFromEvent(e) {
+    const mods = [];
+    if (e.ctrlKey) mods.push('Ctrl');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    if (e.metaKey) mods.push('Super');
+    const key = keyFromEvent(e);
+    if (!key || !mods.length) return '';
+    return mods.join('+') + '+' + key;
+  }
+
+  function endRec(accel) {
+    recSummon = false;
+    summonKey.classList.remove('rec');
+    summonKey.textContent = accelLabel(accel || summonCur);
+  }
+
+  function renderSummon(s) {
+    const info = (s && s.summon) || {};
+    summonCur = info.accel || 'Alt+R';
+    const on = info.enabled !== false;
+    summonEnabled.checked = on;
+    summonKey.disabled = !on;
+    if (!recSummon) summonKey.textContent = accelLabel(summonCur);
+    // 三个状态要分开看：开关关 / 开关开但没抢到键（红） / 已生效（绿）
+    summonKey.classList.toggle('bad', on && !info.active);
+    if (!on) {
+      hintTo('已关闭，这个组合不再被独占，其它程序可以正常使用。', '');
+    } else if (info.error) {
+      hintTo(info.error, 'err');
+    } else if (info.active) {
+      hintTo('当前生效：' + accelLabel(info.active) + '。窗口被盖住时按一下即可唤回。', 'ok');
+    } else {
+      hintTo('', '');
+    }
+  }
+
+  summonKey.addEventListener('click', () => {
+    if (summonKey.disabled || recSummon) return;
+    recSummon = true;
+    summonKey.classList.remove('bad');
+    summonKey.classList.add('rec');
+    summonKey.textContent = '按下新的组合键…';
+    hintTo('支持 Ctrl / Alt / Shift / Win 搭配字母、数字或 F1–F24；Esc 取消。', '');
+    summonKey.focus();
+  });
+
+  summonKey.addEventListener('keydown', async (e) => {
+    if (!recSummon) return;
+    // 录制期间这些按键一个都不能漏给页面：Alt+← 会触发面板后退、Tab 会跳焦点
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      endRec(summonCur);
+      hintTo('已取消，热键未改动。', '');
+      return;
+    }
+    // 只按住修饰键时先别收工，等用户把主键也按下来
+    if (['Control', 'Alt', 'Shift', 'Meta'].indexOf(e.key) >= 0) {
+      hintTo('再按一个字母 / 数字 / 功能键。', '');
+      return;
+    }
+    const accel = accelFromEvent(e);
+    if (!accel) {
+      hintTo('至少要有一个 Ctrl / Alt / Shift，再加一个字母或功能键。', 'err');
+      return;
+    }
+    endRec(accel);
+    const r = await window.vr.setOpt('summonAccel', accel);
+    if (!r || !r.ok) {
+      // 失败时主进程已经把旧键重新注册回去了，这里只要如实说明 + 显示旧值
+      hintTo((r && r.error) || '这个组合不可用，换一个。', 'err');
+      renderSummon(await window.vr.getState());
+      summonKey.classList.add('bad');
+    } else {
+      hintTo('已生效：' + accelLabel(accel) + '。', 'ok');
+      renderSummon(await window.vr.getState());
+    }
+  });
+
+  // 录制中点了别处就当作放弃，别让按钮一直卡在"按下新的组合键"
+  summonKey.addEventListener('blur', () => {
+    if (!recSummon) return;
+    endRec(summonCur);
+    hintTo('', '');
+  });
+
+  summonEnabled.onchange = async () => {
+    await window.vr.setOpt('summonEnabled', summonEnabled.checked);
+    renderSummon(await window.vr.getState());
+  };
+
+  summonReset.onclick = async () => {
+    const r = await window.vr.setOpt('summonAccel', 'Alt+R');
+    if (r && !r.ok) hintTo((r.error || '默认键被占用了，手动换一个。'), 'err');
+    renderSummon(await window.vr.getState());
+  };
 
   document.querySelectorAll('#veilSeg button').forEach((b) => {
     b.addEventListener('click', () => {

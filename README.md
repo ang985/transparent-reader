@@ -55,6 +55,7 @@ npm start
 | `Alt+T` | Toggle temporary click-through (mouse reaches the window underneath) |
 | `Ctrl` + wheel | Zoom the page (the toolbar does not zoom) |
 | `Alt+←` / `Alt+→` | Go back / forward |
+| Summon hotkey (default `Alt+R`, rebindable) | Brings the overlay to the front and focuses it while another app covers it. Rebind or disable it in the control panel |
 
 ### Project structure
 
@@ -130,6 +131,7 @@ npm start
 | `Alt + T` | 临时穿透：鼠标点到下层窗口，再按一次退出 |
 | `Ctrl+滚轮` | 页面缩放（工具条不跟着缩放） |
 | `Alt+←` / `Alt+→` | 页面后退 / 前进 |
+| 全局唤出热键（默认 `Alt+R`，可改） | 窗口被别的程序盖住、或根本没有焦点时，按一下把它提到最前并聚焦。在控制面板里可改键或关闭 |
 
 ### 项目结构
 
@@ -151,6 +153,10 @@ transparent-reader/
 - `insertCSS` 必须用默认 author origin —— user origin 会压过页面内联的 `!important`，导致浓度调节失效
 - 收起胶囊时必须**先建胶囊再隐藏主窗**、展开时**先显示主窗再销毁胶囊**，否则中间的"零窗口"瞬间会触发 `window-all-closed` 把程序退掉
 - "稳定生效"的快捷键应放在主进程 `before-input-event`，而不是页面的 `keydown`（导航、iframe、富文本都会吞事件）
+- 但 `before-input-event` 只在窗口有键盘焦点时才收得到。要解决"窗口被别的程序盖住"，只能用 `globalShortcut`，代价是注册期间该组合被本程序独占
+- `globalShortcut.register()` 抢不到键时**不抛异常、只返回 `false`**，必须检查返回值并回报给界面，否则表现为"设置了热键但按了没反应"
+- 改键要先注册新键、成功后再落盘；失败时把旧键重新注册回去，别让用户卡在"两个键都不生效"
+- 全局热键必须至少带一个修饰键：单键注册会把那个字母从整个系统手里抢走
 - 解析页面颜色的探针元素要用 `style.setProperty(..., 'important')` 写入，否则会被全局透明规则覆盖导致读到的永远是 transparent
 
 ### 许可证

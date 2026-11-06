@@ -59,6 +59,10 @@ const DEFAULT_STATE = {
   sitePrefs: {},
   // 蒙版主题：auto 按页面底色自动判断；light / dark 手动锁死（判断错时用）
   veilMode: 'auto',
+  // 全局唤出热键：窗口被别的程序盖住、或压根没焦点时，按一下把浮层捞到最前并聚焦。
+  // 必须是系统级热键（globalShortcut）—— 那种状态下页面收不到任何键盘事件。
+  summonEnabled: true,
+  summonAccel: 'Alt+R',
 };
 
 let state = { ...DEFAULT_STATE };
@@ -120,6 +124,10 @@ function loadState() {
   state.width = clamp(state.width, MIN_W, 1600);
   state.height = clamp(state.height, MIN_H, 1400);
   if (!Array.isArray(state.history)) state.history = [];
+  // 热键字段容错：老版本的 state.json 里没有这两项，缺了就落回默认值；
+  // 存了乱七八糟的内容也不让它卡在"注册不上还改不掉"的状态。
+  if (state.summonEnabled !== true && state.summonEnabled !== false) state.summonEnabled = true;
+  state.summonAccel = normAccel(state.summonAccel) || SUMMON_DEFAULT;
   // 站点记忆：容错 + 只保留最近 200 个条目，避免这个字段无限长
   if (!state.sitePrefs || typeof state.sitePrefs !== 'object' || Array.isArray(state.sitePrefs)) {
     state.sitePrefs = {};
@@ -721,6 +729,164 @@ function togglePassthrough() {
   return { ok: setPassthrough(!passthrough) };
 }
 
+// ---------------- 全局唤出热键 ----------------
+// 为什么必须走 globalShortcut，而不是像 Alt+Q / Alt+P 那样用 before-input-event：
+// 后者只在本窗口吃到键盘事件时才触发，而这里要解决的恰恰是
+// "窗口被别的程序盖住 / 根本没有键盘焦点" —— 那种状态下页面一个键都收不到。
+//
+// 代价也要说清楚：全局热键是**独占**的，注册期间其它程序收不到这个组合。
+// 所以默认挑了一个不常用的 Alt+R，并且只在用户开着开关时才注册。
+const SUMMON_DEFAULT = 'Alt+R';
+const SUMMON_MODS = ['Ctrl', 'Alt', 'Shift', 'Super'];
+
+// 键名白名单：只放行这些，避免用户录进 "MediaPlayPause" 之类
+// Electron 能吃但 Windows 上行为诡异的键，也避免拼出非法 accelerator。
+const SUMMON_KEY_RE = /^(?:[A-Z0-9]|F(?:[1-9]|1\d|2[0-4])|Space|Tab|Enter|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Up|Down|Left|Right)$/;
+
+// 系统保留组合：Windows 会先一步吃掉，注册要么直接失败，要么"成功"但永远不触发。
+// 与其让用户录进来再一脸问号，不如当场说不可用。
+const SUMMON_RESERVED = new Set([
+  'ALT+F4', 'ALT+TAB', 'ALT+ESC', 'ALT+SPACE', 'ALT+PRINTSCREEN',
+  'CTRL+ESC', 'CTRL+ALT+DEL', 'CTRL+ALT+TAB', 'CTRL+SHIFT+ESC', 'CTRL+SHIFT+ENTER',
+  'SUPER+L', 'SUPER+D', 'SUPER+E', 'SUPER+R', 'SUPER+TAB', 'SUPER+S', 'SUPER+X', 'SUPER+I',
+]);
+
+// 应用内部的本地快捷键。它们靠 before-input-event 工作，一旦被登记成全局热键，
+// 窗口有焦点时两个通道会同时响应（比如收起两次），必须挡掉。
+const SUMMON_TAKEN = {
+  'ALT+Q': '收起 / 展开浮层',
+  'ALT+P': '唤出控制面板',
+  'ALT+T': '临时穿透',
+};
+
+let summonAccel = '';   // 真正注册成功的组合（空 = 当前没生效）
+let summonError = '';   // 最近一次失败原因，面板要原样显示给用户
+
+// 规范化：'ctrl+alt+r' / 'Alt + R' / 'CMDORCTRL+K' → 'Ctrl+Alt+R' / 'Ctrl+K'
+// 不合法时返回 ''，让调用方给出人话提示，而不是把非法串丢进 register() 撞异常。
+function normAccel(raw) {
+  const parts = String(raw || '').split('+').map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return '';
+  const mods = new Set();
+  let key = '';
+  for (const p of parts) {
+    const l = p.toLowerCase();
+    if (l === 'ctrl' || l === 'control' || l === 'cmdorctrl' || l === 'commandorcontrol') mods.add('Ctrl');
+    else if (l === 'alt' || l === 'option') mods.add('Alt');
+    else if (l === 'shift') mods.add('Shift');
+    else if (l === 'super' || l === 'meta' || l === 'win' || l === 'cmd' || l === 'command') mods.add('Super');
+    else if (!key) key = p.length === 1 ? p.toUpperCase() : p.replace(/^f/i, 'F');
+  }
+  if (!key || !SUMMON_KEY_RE.test(key)) return '';
+  // 必须至少一个修饰键：单键做全局热键会把那个键从整个系统手里抢走，
+  // 用户从此打不出那个字母，属于事故级配置。
+  if (!mods.size) return '';
+  return SUMMON_MODS.filter((m) => mods.has(m)).join('+') + '+' + key;
+}
+
+function unregisterSummon() {
+  if (!summonAccel) return;
+  try { globalShortcut.unregister(summonAccel); } catch (_) {}
+  summonAccel = '';
+}
+
+// 统一的注册入口：先干净注销，再按当前 state 重新注册。
+// 返回 { ok, error }，面板据此显示"已生效 / 被占用"。
+function registerSummon() {
+  unregisterSummon();
+  summonError = '';
+  if (state.summonEnabled === false) {
+    log('summon hotkey disabled');
+    return { ok: true, active: '' };
+  }
+  const acc = normAccel(state.summonAccel);
+  if (!acc) {
+    summonError = '至少要带一个 Ctrl / Alt / Shift，再加一个字母或功能键';
+    log('summon hotkey invalid: ' + state.summonAccel);
+    return { ok: false, error: summonError };
+  }
+  if (SUMMON_RESERVED.has(acc.toUpperCase())) {
+    summonError = acc + ' 是系统保留组合，抢不到，换一个';
+    log('summon hotkey reserved: ' + acc);
+    return { ok: false, error: summonError };
+  }
+  const taken = SUMMON_TAKEN[acc.toUpperCase()];
+  if (taken) {
+    summonError = acc + ' 已经被「' + taken + '」占用，换一个';
+    log('summon hotkey conflicts with builtin: ' + acc);
+    return { ok: false, error: summonError };
+  }
+  let ok = false;
+  try {
+    ok = globalShortcut.register(acc, () => { summonOverlay(); });
+  } catch (e) {
+    summonError = '注册失败：' + e.message;
+  }
+  if (!ok) {
+    // register() 返回 false 基本就是"被别的程序占了"，它不会抛异常也不说原因。
+    if (!summonError) summonError = acc + ' 被其它程序占用了，换一个组合';
+    log('summon hotkey register failed: ' + acc + ' / ' + summonError);
+    return { ok: false, error: summonError };
+  }
+  summonAccel = acc;
+  log('summon hotkey registered: ' + acc);
+  return { ok: true, active: acc };
+}
+
+// 把浮层捞回最前并真正拿到键盘焦点。
+// 窗口可能处于四种"看不见"的状态，得分别处理，少一种用户就会觉得热键"没反应"：
+//   1. 被别的窗口盖住（有焦点/无焦点都可能）→ raiseOverlay 的 moveTop + focus
+//   2. 已收成胶囊 → raiseOverlay 内部先 expandOverlay
+//   3. 临时穿透中 → 窗口在画面上但鼠标点不进去，先退出穿透
+//   4. 压根没有阅读层 → 唤出控制面板，让用户自己决定看什么
+function summonOverlay() {
+  const win = currentOverlay();
+  if (!win) {
+    showPanel();
+    log('summon: no overlay window, panel shown instead');
+    return { ok: false, reason: 'no-window' };
+  }
+  if (passthrough) setPassthrough(false);
+  try { if (win.isMinimized()) win.restore(); } catch (_) {}
+  if (!win.isVisible()) win.show();
+  // 已经置顶时 raiseOverlay 照样有意义：置顶只保证"在所有窗口之上"，
+  // 不保证"键盘焦点在它身上"，而被盖住时往往两样都缺，所以这里不跳过。
+  const ok = raiseOverlay(win);
+  log('summon: raise ' + (ok ? 'ok' : 'failed'));
+  return { ok };
+}
+
+// 改键：先按新键注册，成功了才落盘；失败就退回去把旧键重新注册上，
+// 不能让用户处于"改了键但两个都不生效"的状态。
+function setSummonAccel(raw) {
+  const acc = normAccel(raw);
+  if (!acc) {
+    return { ok: false, error: '至少要带一个 Ctrl / Alt / Shift，再加一个字母或功能键' };
+  }
+  const prev = state.summonAccel;
+  state.summonAccel = acc;
+  const r = registerSummon();
+  if (!r.ok) {
+    state.summonAccel = prev;
+    registerSummon();          // 旧键恢复，界面不会因为一次误改就没热键可用
+    notifyPanel();
+    return { ok: false, error: r.error };
+  }
+  saveState();
+  notifyPanel();
+  return { ok: true, accel: acc, active: summonAccel };
+}
+
+function setSummonEnabled(on) {
+  state.summonEnabled = !!on;
+  const r = registerSummon();
+  saveState();
+  notifyPanel();
+  // 开关保持用户选的样子，但注册失败要如实回传，面板会用红字提示，
+  // 而不是"开关是开的、其实没生效"这种静默失败。
+  return r.ok ? { ok: true, active: summonAccel } : { ok: false, error: r.error };
+}
+
 function moveBy(win, dx, dy) {
   const [x, y] = win.getPosition();
   win.setPosition(Math.round(x + dx), Math.round(y + dy));
@@ -760,6 +926,15 @@ function panelState() {
     effAlpha: win ? (typeof win.__st.eff === 'number' ? win.__st.eff : win.__st.alpha) : state.alpha,
     hasOverlay: !!win,
     passthrough,
+    // 全局唤出热键：enabled 是用户的开关，accel 是配置值，active 是**真正注册成功**的键。
+    // 三者分开是必要的：开关打开 + accel 有值 + active 为空 = 被占用，面板必须红字提示，
+    // 否则用户会以为"设了热键却没反应"是程序坏了。
+    summon: {
+      enabled: state.summonEnabled !== false,
+      accel: state.summonAccel || SUMMON_DEFAULT,
+      active: summonAccel,
+      error: summonError,
+    },
     // 当前站点的记忆值（null 表示这个站点还没单独记过）
     site: site ? {
       key: site.key,
@@ -800,7 +975,7 @@ function createTray() {
       { label: '打开面板', click: () => showPanel() },
       { label: '隐藏 / 显示浮层', enabled: has, click: () => toggleVisible() },
       { label: miniWin ? '展开阅读层' : '收起为小胶囊（Alt+Q）', enabled: has || !!miniWin, click: () => { if (miniWin) expandOverlay(); else collapseOverlay(); } },
-      { label: '把浮层提到最前', enabled: has, click: () => raiseOverlay() },
+      { label: '把浮层提到最前' + (summonAccel ? '（' + summonAccel + '）' : ''), enabled: has, click: () => summonOverlay() },
       { label: passthrough ? '退出临时穿透（Alt+T）' : '临时穿透：鼠标穿透下层（Alt+T）', enabled: has, click: () => setPassthrough(!passthrough) },
       { label: state.onTop !== false ? '取消置顶（可被其它窗口盖住）' : '恢复置顶', enabled: has, click: () => {
         state.onTop = state.onTop === false;
@@ -949,6 +1124,12 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
     notifyPanel();
     return { ok: true };
   }
+  if (key === 'summonEnabled') {
+    return setSummonEnabled(val);
+  }
+  if (key === 'summonAccel') {
+    return setSummonAccel(val);
+  }
   if (key === 'hideImages' || key === 'focus') {
     state[key] = !!val;
     if (win) {
@@ -967,7 +1148,7 @@ ipcMain.handle('vr-close-all', () => {
   return { ok: true };
 });
 
-ipcMain.handle('vr-raise', () => ({ ok: raiseOverlay() }));
+ipcMain.handle('vr-raise', () => summonOverlay());
 
 // ---------------- 收起成小胶囊 ----------------
 // 悬浮层不适合"最小化到任务栏"（那会把自己暴露在任务栏里）。
@@ -1300,6 +1481,11 @@ if (!gotTheLock) {
     // 自动化验证和"脚本一键换渲染方式"都靠它，不用去点面板。
     const openArg = Array.isArray(argv) ? argv.find((a) => /^--vr-open=/.test(a)) : null;
     const veilArg = Array.isArray(argv) ? argv.find((a) => /^--vr-veil=/.test(a)) : null;
+    // --vr-summon-hotkey=Ctrl+Alt+K / --vr-summon=0|1：运行时改全局热键，
+    // 走的是和面板完全相同的 setSummonAccel / setSummonEnabled，
+    // 便于脚本切换和自动化验证"改键即时生效、失败能回退"。
+    const hkArg = Array.isArray(argv) ? argv.find((a) => /^--vr-summon-hotkey=/.test(a)) : null;
+    const sumArg = Array.isArray(argv) ? argv.find((a) => /^--vr-summon=/.test(a)) : null;
     if (openArg) {
       const target = openArg.slice('--vr-open='.length);
       log('open requested by command line: ' + target.slice(0, 60));
@@ -1309,6 +1495,16 @@ if (!gotTheLock) {
     }
     if (veilArg) {
       setVeilMode(veilArg.slice('--vr-veil='.length));
+      return;
+    }
+    if (hkArg) {
+      const r = setSummonAccel(hkArg.slice('--vr-summon-hotkey='.length));
+      log('summon hotkey by command line: ' + JSON.stringify(r));
+      return;
+    }
+    if (sumArg) {
+      const r = setSummonEnabled(sumArg.slice('--vr-summon='.length) !== '0');
+      log('summon switch by command line: ' + JSON.stringify(r));
       return;
     }
     log('second launch detected, reusing the running instance');
@@ -1321,6 +1517,9 @@ if (!gotTheLock) {
     loadState();
     createTray();
     startBarWatch();
+    // 全局热键必须在 whenReady 之后注册（Electron 要求 app ready）。
+    // 注册失败不阻断启动：面板照样能开，只是会在设置区用红字说明没抢到键。
+    registerSummon();
 
     // 启动只打开控制面板，阅读层按需再开：
     // 双击桌面图标时不应该突然在屏幕上盖一层窗口 —— 用户可能只是想改个浓度、
