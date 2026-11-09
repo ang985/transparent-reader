@@ -1515,6 +1515,17 @@ if (!gotTheLock) {
 
   app.whenReady().then(() => {
     loadState();
+    // --vr-quit 的双保险。
+    // 正常路径是"第二个实例把 argv 交给已在运行的实例，由它自己退出"，
+    // 但这里有个时序竞争：如果原实例退得太快、锁已经释放，
+    // 这个带 --vr-quit 的进程反而会抢到锁、变成新的常驻实例 ——
+    // 看起来就像"关不掉，还多了一个进程"。启动阶段自己再判一次，杜绝这种残留。
+    if (process.argv.indexOf('--vr-quit') >= 0) {
+      log('quit requested at startup, exiting before creating any window');
+      try { saveState(); } catch (_) { /* ignore */ }
+      app.quit();
+      return;
+    }
     createTray();
     startBarWatch();
     // 全局热键必须在 whenReady 之后注册（Electron 要求 app ready）。
