@@ -37,6 +37,12 @@ try {
 }
 
 const STATE_FILE = path.join(app.getPath('userData'), 'state.json');
+// 先写临时文件再 rename（同盘 rename 是原子的），并保留一份上一版：
+// 直接覆盖写的话，断电/崩溃/磁盘满会留下 0 字节或半截 JSON，
+// 下次启动 JSON.parse 抛错 → 静默落回 DEFAULT_STATE，浓度、站点记忆、
+// 热键、窗口位置全丢且无从恢复。
+const STATE_TMP = STATE_FILE + '.tmp';
+const STATE_BAK = STATE_FILE + '.bak';
 
 const DEFAULT_STATE = {
   url: '',
@@ -125,13 +131,37 @@ function log(msg) {
   } catch (_) { /* ignore */ }
 }
 
-function loadState() {
+// 读一个 state 文件：不存在 / 读不了 / 内容不是合法 JSON 对象，统一返回 null。
+// 空文件也要当失败——那正是"覆盖写到一半断电"的典型产物。
+function readStateFile(file) {
   try {
-    const raw = fs.readFileSync(STATE_FILE, 'utf8').replace(/^\uFEFF/, '');
+    const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+    if (!raw.trim()) return null;
     const parsed = JSON.parse(raw);
-    state = { ...DEFAULT_STATE, ...parsed };
-  } catch (e) {
-    state = { ...DEFAULT_STATE };
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+function loadState() {
+  const primary = readStateFile(STATE_FILE);
+  let recoveredFromBak = false;
+  if (primary) {
+    state = { ...DEFAULT_STATE, ...primary };
+  } else {
+    // 主文件坏了（断电写坏 / 被外部改坏）→ 用上一次的备份救回来。
+    // 不这么做的话，用户攒了很久的站点记忆、热键配置会被一把清空。
+    const bak = readStateFile(STATE_BAK);
+    if (bak) {
+      state = { ...DEFAULT_STATE, ...bak };
+      recoveredFromBak = true;
+      log('state.json 不可用，已从 state.json.bak 恢复');
+    } else {
+      state = { ...DEFAULT_STATE };
+      if (fs.existsSync(STATE_FILE)) log('state.json 与备份都不可用，使用默认配置');
+    }
   }
   state.alpha = clamp(state.alpha, 0, 0.92);
   state.zoom = clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX);
@@ -164,6 +194,14 @@ function loadState() {
     if (!Object.keys(out).length) delete state.sitePrefs[k];
     else state.sitePrefs[k] = out;
   }
+
+  // 从备份恢复后立刻把主文件修回去，否则每次启动都要再走一遍"读坏文件"。
+  // 但必须先删掉那个坏文件：saveState 会先把当前 state.json 复制成 .bak，
+  // 留着坏文件就把唯一的好备份也覆盖成坏的了 —— 那等于白备份。
+  if (recoveredFromBak) {
+    try { fs.unlinkSync(STATE_FILE); } catch (_) {}
+    saveState();
+  }
 }
 
 function saveState() {
@@ -174,9 +212,32 @@ function saveState() {
       state.activeTab = 0;
     }
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+
+    const json = JSON.stringify(state, null, 2);
+
+    // 1) 先整份写进 .tmp，并 fsync。
+    //    fsync 不能省：部分文件系统上 rename 会先落盘、数据块后落盘，
+    //    断电后可能出现"文件名换了、内容是空的"。写完立刻 fsync 才真正安全。
+    const fd = fs.openSync(STATE_TMP, 'w');
+    try {
+      fs.writeFileSync(fd, json, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    // 2) 把上一版留成 .bak。用 copy 而不是 rename —— rename 会把主文件挪走，
+    //    中间那一瞬主文件不存在，此刻崩溃就两头空。
+    try {
+      if (fs.existsSync(STATE_FILE)) fs.copyFileSync(STATE_FILE, STATE_BAK);
+    } catch (_) { /* 备份失败不该阻断正常保存 */ }
+
+    // 3) 原子替换：同盘 rename 要么全成、要么全不成，
+    //    绝不会留下"主文件被截断成半截 JSON"的中间态。
+    fs.renameSync(STATE_TMP, STATE_FILE);
   } catch (e) {
     log('saveState failed: ' + e.message);
+    try { fs.unlinkSync(STATE_TMP); } catch (_) {}
   }
 }
 
@@ -1684,6 +1745,16 @@ if (!gotTheLock) {
     // 注册失败不阻断启动：面板照样能开，只是会在设置区用红字说明没抢到键。
     registerSummon();
 
+    // 首次启动也认 --vr-open。这条参数原本只在 second-instance（已有实例）里处理，
+    // 第一个进程带着它会被无声忽略 —— 拿它做自动化/脚本时非常困惑。
+    const openAtBoot = process.argv.find((a) => /^--vr-open=/.test(a));
+    if (openAtBoot) {
+      const target = openAtBoot.slice('--vr-open='.length);
+      log('open requested at startup: ' + target.slice(0, 60));
+      createOverlay(target);
+      return;
+    }
+
     // 启动只打开控制面板，阅读层按需再开：
     // 双击桌面图标时不应该突然在屏幕上盖一层窗口 —— 用户可能只是想改个浓度、
     // 或者先看看最近看过什么。上次的网址已经由 state.url 带给面板，
@@ -1692,13 +1763,14 @@ if (!gotTheLock) {
     showPanel();
 
     if (process.env.VR_AUTOVIEW === '1') {
+      // 多页签早已移除，state.tabs 只是老 state.json 的残留字段。
+      // 优先用 state.url —— 否则改过 url 之后仍会被旧 tabs 里那条顶掉，
+      // 表现就是"明明设了新地址，打开的还是上一页"。
       const saved = Array.isArray(state.tabs) ? state.tabs.filter((t) => t && t.url) : [];
-      let restoreUrl = '';
-      if (saved.length) {
+      let restoreUrl = state.url || '';
+      if (!restoreUrl && saved.length) {
         const idx = clamp(Number(state.activeTab) || 0, 0, saved.length - 1);
         restoreUrl = saved[idx].url || saved[0].url;
-      } else if (state.url) {
-        restoreUrl = state.url;
       }
       if (restoreUrl) createOverlay(restoreUrl);
     }

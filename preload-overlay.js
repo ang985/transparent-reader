@@ -1111,11 +1111,6 @@ function markChecks() {
   }
 }
 
-function scanOverlays() {
-  markDialogs();
-  markChecks();
-}
-
 // ============================================================
 // 语义色还原：把被透明化顺手清掉的"状态色"找回来
 //
@@ -1757,6 +1752,9 @@ function boot() {
     // 字号要在 DOM 就绪后处理；观察器负责后续滚动加载出来的段落
     applyFontScale();
     watchFontNodes();
+    // 弹窗/懒加载内容靠 DOM 变动触发重扫，替掉原来的 1.2 秒轮询
+    watchDom();
+    watchTheme();
   }
   return ok;
 }
@@ -1772,19 +1770,154 @@ window.addEventListener('load', boot);
 setTimeout(guardBlank, 5000);
 setTimeout(guardBlank, 12000);
 
-// 弹窗是点击后才出现的，需要持续盯着
-// 顺便复查一次横向溢出（SPA 切页面后布局会变）
-let tidyTick = 0;
+// 弹窗是点击后才出现的，得盯着 DOM；但不能每 1.2 秒全量扫一遍。
+//
+// 原来这套挂在 1.2 秒的 setInterval 上，每个 tick 都干四件重活：
+//   scanOverlays()   遍历全文档 + getBoundingClientRect（强制布局）
+//   decidePad()      elementFromPoint ×3 + 祖先链 getComputedStyle（强制布局）
+//   tidyOverflowX()  读 scrollWidth（同步布局）
+//   applyTheme()     改 <html> class 再读计算样式（强制布局）
+// 在几千个节点的长页面上，这就是每 1.2 秒一次主线程停顿，越滚越涩。
+//
+// 现在改成事件驱动：
+//   - DOM 一有变动就防抖 300ms 重扫一次（懒加载、无限滚动都靠它）
+//   - 滚动过程中完全不扫，停下 500ms 后补一次
+//   - 20 秒兜底定时器只查 vr-root 还在不在，不触碰任何布局
+let rescanTimer = 0;
+let scrollStopTimer = 0;
+let lastScrollAt = 0;
+
+function isScrolling() {
+  return Date.now() - lastScrollAt < 500;
+}
+
+// 重活集合：扫描 + 只在结构/尺寸变了时才重算留白与横向溢出
+function rescan(withLayout) {
+  if (!document.body) return;
+  scanOverlays();
+  if (withLayout) {
+    decidePad();
+    tidyOverflowX();
+  }
+}
+
+// 防抖：一次无限滚动能连着插几十个节点，只在安静下来后扫一次
+function scheduleRescan(delay) {
+  clearTimeout(rescanTimer);
+  rescanTimer = setTimeout(() => {
+    rescanTimer = 0;
+    if (document.hidden) return;
+    // 还在滚就先不动，等滚动停下会再排一次
+    if (isScrolling()) { scheduleRescan(600); return; }
+    rescan(true);
+    applyTheme();
+    if (!document.getElementById('vr-root')) paintRoot();   // 被页面重渲染清掉就补回来
+  }, delay == null ? 300 : delay);
+}
+
+// 我们自己注入的节点不能算"页面结构变化"，否则挂一个工具条就自激重扫
+const OWN_NODE_IDS = {
+  'vr-toolbar': 1, 'vr-find': 1, 'vr-frame': 1,
+  'vr-root': 1, 'vr-passthrough-badge': 1, 'vr-blank': 1,
+};
+
+function isOwnNode(n) {
+  if (!n || n.nodeType !== 1) return false;
+  if (OWN_NODE_IDS[n.id]) return true;
+  if (n.hasAttribute && n.hasAttribute('data-vr-tint-probe')) return true;
+  return false;
+}
+
+const domObserver = new MutationObserver((records) => {
+  for (const r of records) {
+    if (r.type !== 'childList') continue;
+    for (const n of r.addedNodes) {
+      if (n.nodeType === 1 && !isOwnNode(n)) { scheduleRescan(300); return; }
+    }
+    for (const n of r.removedNodes) {
+      if (n.nodeType === 1 && !isOwnNode(n)) { scheduleRescan(300); return; }
+    }
+  }
+});
+
+function watchDom() {
+  // 只盯 body：要标记的弹窗、勾选框、答题卡全在 body 里。
+  // 盯 documentElement 会顺带收到 <head> 的变动 —— 定时改 document.title、
+  // 第三方脚本插 <style>，都会白白触发一次全量重扫。
+  if (!document.body) return;
+  domObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+// 主题切换通常只改 <html class="dark"> 或 --xxx 变量，不产生 childList 变化。
+// 单独盯 documentElement 的 class/style（不设 subtree，范围只有 <html> 自己），
+// 防抖 400ms 后再判定一次深浅 —— 替掉原来"每 6 秒复查一次"的做法。
+//
+// 关键是不能被自己误触发：probePageBg() 会临时加 .vr-probe，
+// decidePad() 会加 .vr-pad-body / .vr-pad-inner，都是 <html> 上的 class 变化。
+// 若照单全收，就变成"重扫 → 改类 → 又判定主题 → 再探测"的自激循环，
+// 每 400ms 一次强制布局，比原来的轮询还糟。
+// 所以只比较**去掉 vr- 前缀之后**的类名：我们自己改的类被滤掉，
+// 页面真正的 html.dark / html.light 才放行。
+function stripVrClass(s) {
+  return String(s || '').split(/\s+/)
+    .filter((c) => c && !/^vr-/.test(c))
+    .join(' ');
+}
+
+let themeTimer = 0;
+
+const themeObserver = new MutationObserver((records) => {
+  let meaningful = false;
+  for (const r of records) {
+    if (r.attributeName === 'class') {
+      const now = stripVrClass(document.documentElement.className);
+      const old = stripVrClass(r.oldValue || '');
+      if (now !== old) { meaningful = true; break; }
+    } else if (r.attributeName === 'style') {
+      // 我们不往 <html> 写 inline style（蒙版写在 <style id="vr-root"> 里），
+      // 所以 html 的 style 变化一定来自页面，比如切主题时改 CSS 变量。
+      meaningful = true;
+      break;
+    }
+  }
+  if (!meaningful) return;
+  clearTimeout(themeTimer);
+  themeTimer = setTimeout(() => {
+    if (document.hidden) return;
+    applyTheme();
+  }, 400);
+});
+
+function watchTheme() {
+  if (!document.documentElement) return;
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeOldValue: true,
+    attributeFilter: ['class', 'style'],
+  });
+}
+
+// 只记录时间，不做重活。scroll 不冒泡，capture 才收得到元素级滚动。
+window.addEventListener('scroll', () => {
+  lastScrollAt = Date.now();
+  clearTimeout(scrollStopTimer);
+  scrollStopTimer = setTimeout(() => {
+    // 滚动期间插入的新内容（懒加载）在这里补扫
+    scheduleRescan(0);
+  }, 500);
+}, { passive: true, capture: true });
+
+// 切回前台补一次：hidden 期间的所有重扫都被跳过了
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) scheduleRescan(200);
+});
+
+// 兜底：canvas 重绘、CSS 动画、媒体查询换主题，MutationObserver 都看不见。
+// 但它只做一次 getElementById，不触发任何布局计算。
 setInterval(() => {
   if (document.hidden) return;
-  scanOverlays();
-  tidyTick += 1;
-  if (!document.getElementById('vr-root')) paintRoot();   // 被页面重渲染清掉就补回来
-  if (tidyTick % 2 === 0) decidePad();      // SPA 换路由后滚动结构会变
-  if (tidyTick % 3 === 0) tidyOverflowX();
-  // 每 5 个 tick（约 6 秒）复查一次深浅：SPA 换页、切主题都会让底色变
-  if (tidyTick % 5 === 0) applyTheme();
-}, 1200);
+  if (!document.getElementById('vr-root')) paintRoot();
+}, 20000);
 
 window.addEventListener('resize', () => {
   setTimeout(decidePad, 200);
