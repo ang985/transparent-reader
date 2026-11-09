@@ -45,6 +45,10 @@ function applyBarZoom() {
   const bar = document.getElementById(BAR_ID);
   if (!bar) return;
   bar.style.setProperty('zoom', String(1 / zoomFactor), 'important');
+  // 查找条挂在工具条正下方，得用同样的反向缩放，否则页面放大后
+  // 它会和工具条之间裂开一条缝（30px 也会被 zoom 放大）
+  const find = document.getElementById(FIND_ID);
+  if (find) find.style.setProperty('zoom', String(1 / zoomFactor), 'important');
 }
 
 // 工具条是否"常亮"：开启后不再随鼠标淡出，始终完全不透明
@@ -280,6 +284,124 @@ function applyTheme() {
   reportTheme();
 }
 
+// ---------------- 正文字号 ----------------
+// 为什么不去改 body 的 font-size：大量站点用 px 把字号固定写在各自的 CSS 类上，
+// 改 body 基准对它们完全无效 —— 只有用 em / rem / % 的后代才会跟着变。
+// 所以这里改成"逐元素记基准、按比例写回 inline px"：
+//   · 只处理**直接承载文字**的元素，数量与段落数同量级，不是整个 DOM
+//   · 基准从 computed 读一次就缓存，拖滑块时只做乘法，不再触发样式计算
+//   · 必须写绝对 px —— 写 1.2em 会在嵌套结构里逐层累乘，越深的文字越大
+const FONT_MIN = 0.8;
+const FONT_MAX = 1.6;
+
+// 自动滚动：px/秒
+const SCROLL_MIN = 15;
+const SCROLL_MAX = 300;
+const SCROLL_DEFAULT = 60;
+
+function readScrollSpeedFromArgv() {
+  const hit = process.argv.find((a) => a.startsWith('--vr-scroll-speed='));
+  const v = hit ? parseFloat(hit.split('=')[1]) : SCROLL_DEFAULT;
+  if (!isFinite(v)) return SCROLL_DEFAULT;
+  return Math.min(SCROLL_MAX, Math.max(SCROLL_MIN, v));
+}
+
+let scrollSpeed = readScrollSpeedFromArgv();
+
+function readFontFromArgv() {
+  const hit = process.argv.find((a) => a.startsWith('--vr-font='));
+  const v = hit ? parseFloat(hit.split('=')[1]) : 1;
+  if (!isFinite(v)) return 1;
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, v));
+}
+
+let fontScale = readFontFromArgv();
+
+const fsBase = new WeakMap();     // el -> 未缩放时的 px
+const fsInline = new WeakMap();   // el -> 元素原本的 inline font-size（值 + 优先级）
+const fsTouched = new WeakSet();  // 被我们改过的元素
+const FS_SKIP = /^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA|OPTION|SVG)$/i;
+
+function hasOwnText(el) {
+  for (let n = el.firstChild; n; n = n.nextSibling) {
+    if (n.nodeType === 3 && n.nodeValue && n.nodeValue.trim()) return true;
+  }
+  return false;
+}
+
+// 回到"我们没碰过"的状态：页面原本有 inline 就写回去，没有才删。
+// 直接 removeProperty 会把页面自己的内联字号一起删掉，那属于破坏页面。
+function restoreFont(el) {
+  const origin = fsInline.get(el);
+  if (origin && origin.value) {
+    el.style.setProperty('font-size', origin.value, origin.priority);
+  } else {
+    el.style.removeProperty('font-size');
+  }
+  fsTouched.delete(el);
+}
+
+function applyFontTo(list) {
+  const scale = fontScale;
+  for (const el of list) {
+    if (el.nodeType !== 1 || FS_SKIP.test(el.tagName)) continue;
+    if (!hasOwnText(el)) continue;
+    if (!fsInline.has(el)) {
+      fsInline.set(el, {
+        value: el.style.getPropertyValue('font-size'),
+        priority: el.style.getPropertyPriority('font-size'),
+      });
+    }
+    if (Math.abs(scale - 1) < 0.005) {
+      if (fsTouched.has(el)) restoreFont(el);
+      continue;
+    }
+    let base = fsBase.get(el);
+    if (base == null) {
+      base = parseFloat(getComputedStyle(el).fontSize) || 0;
+      if (!base) continue;
+      fsBase.set(el, base);
+    }
+    el.style.setProperty('font-size', (base * scale).toFixed(2) + 'px', 'important');
+    fsTouched.add(el);
+  }
+}
+
+function applyFontScale() {
+  if (!document.body) return 0;
+  applyFontTo(document.body.getElementsByTagName('*'));
+  return 1;
+}
+
+// 页面是 SPA，正文经常是滚动加载出来的。只靠一次性扫描，
+// 往下滚两屏之后的文字就还是原字号，看起来像"只生效了一半"。
+let fsObserver = null;
+let fsSweep = 0;
+
+function watchFontNodes() {
+  if (fsObserver || !document.body) return;
+  fsObserver = new MutationObserver((muts) => {
+    if (Math.abs(fontScale - 1) < 0.005) return;
+    const added = [];
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (n.nodeType !== 1) continue;
+        added.push(n);
+        const kids = n.getElementsByTagName ? n.getElementsByTagName('*') : [];
+        for (const k of kids) added.push(k);
+      }
+    }
+    if (!added.length) return;
+    // 一次 DOM 变动可能带几百个节点，合并到下一帧统一处理
+    if (fsSweep) return;
+    fsSweep = requestAnimationFrame(() => {
+      fsSweep = 0;
+      applyFontTo(added);
+    });
+  });
+  fsObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 // 顶部留白该加在哪一层，取决于页面的滚动结构（详见 styles.js 里的注释）。
 //   文档流滚动        → 加在 body（CSS 的 html.vr-pad-body 负责）
 //   内部滚动容器      → 加在那个容器上；加在 body 会撑出第二条滚动条
@@ -330,6 +452,7 @@ function decidePad() {
 }
 
 const BAR_ID = 'vr-toolbar';
+const FIND_ID = 'vr-find';
 const FRAME_ID = 'vr-frame';
 const BAR_HOVER_ZONE = 34;   // 与主进程 BAR_HIT_ZONE 保持一致：工具条 30px + 4px 余量
 const BAR_IDLE_OPACITY = '0.32';
@@ -352,6 +475,184 @@ function buildFrame() {
   document.documentElement.appendChild(frame);
   return true;
 }
+
+// ---------------- 页面内查找 ----------------
+// 真正的匹配交给主进程的 webContents.findInPage（Chromium 原生实现），
+// 这里只负责那个小横条：输入、计数、上一个/下一个。
+// 之所以不自己遍历 DOM 找文字：原生查找能正确处理跨节点、富文本、Shadow DOM，
+// 而且自带"滚动到匹配处 + 高亮"，自己实现这两件事会差很多。
+let findBar = null;
+let findInput = null;
+let findCount = null;
+let findOpen = false;
+let findTimer = 0;
+
+function buildFindBar() {
+  if (!document.documentElement) return;
+  if (document.getElementById(FIND_ID)) return;
+
+  const bar = document.createElement('div');
+  bar.id = FIND_ID;
+  const s = bar.style;
+  s.setProperty('position', 'fixed', 'important');
+  s.setProperty('top', '30px', 'important');
+  s.setProperty('left', '50%', 'important');
+  s.setProperty('transform', 'translateX(-50%)', 'important');
+  s.setProperty('display', 'none', 'important');
+  s.setProperty('align-items', 'center', 'important');
+  s.setProperty('gap', '2px', 'important');
+  s.setProperty('width', '330px', 'important');
+  s.setProperty('height', '32px', 'important');
+  s.setProperty('padding', '0 6px', 'important');
+  s.setProperty('box-sizing', 'border-box', 'important');
+  s.setProperty('background', 'rgba(255,255,255,0.97)', 'important');
+  s.setProperty('border', '1px solid rgba(0,0,0,0.18)', 'important');
+  s.setProperty('border-top', 'none', 'important');
+  s.setProperty('border-radius', '0 0 8px 8px', 'important');
+  s.setProperty('box-shadow', '0 6px 18px rgba(0,0,0,0.20)', 'important');
+  s.setProperty('z-index', '2147483647', 'important');
+  s.setProperty('font-family', '"Microsoft YaHei UI","Segoe UI",sans-serif', 'important');
+  s.setProperty('font-size', '12px', 'important');
+  s.setProperty('color', '#3a3f47', 'important');
+  s.setProperty('user-select', 'none', 'important');
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '在当前页查找…';
+  input.spellcheck = false;
+  const is = input.style;
+  // 显式给宽度而不是只靠 flex:1：这个条挂在页面 body 下，
+  // 页面的某些全局规则（max-width、flex 容器重置）会让 flex 子项算出 0 宽，
+  // 尺寸为 0 的 input 在 Chromium 里 focus() 会静默失败。
+  is.setProperty('flex', '0 0 226px', 'important');
+  is.setProperty('width', '226px', 'important');
+  is.setProperty('min-width', '0', 'important');
+  is.setProperty('height', '22px', 'important');
+  is.setProperty('margin', '0 4px', 'important');
+  is.setProperty('border', 'none', 'important');
+  is.setProperty('outline', 'none', 'important');
+  is.setProperty('background', 'transparent', 'important');
+  is.setProperty('font-size', '12.5px', 'important');
+  is.setProperty('font-family', 'inherit', 'important');
+  is.setProperty('color', '#16181d', 'important');
+  bar.appendChild(input);
+
+  const count = document.createElement('span');
+  count.textContent = '';
+  count.style.setProperty('flex', '0 0 auto', 'important');
+  count.style.setProperty('min-width', '46px', 'important');
+  count.style.setProperty('text-align', 'right', 'important');
+  count.style.setProperty('color', '#8b929c', 'important');
+  count.style.setProperty('font-size', '11.5px', 'important');
+  bar.appendChild(count);
+
+  const mkBtn = (label, tip, cb) => {
+    const b = document.createElement('div');
+    b.textContent = label;
+    b.title = tip;
+    const bs = b.style;
+    bs.setProperty('width', '22px', 'important');
+    bs.setProperty('height', '22px', 'important');
+    bs.setProperty('display', 'flex', 'important');
+    bs.setProperty('align-items', 'center', 'important');
+    bs.setProperty('justify-content', 'center', 'important');
+    bs.setProperty('border-radius', '4px', 'important');
+    bs.setProperty('cursor', 'default', 'important');
+    bs.setProperty('font-size', '14px', 'important');
+    bs.setProperty('line-height', '1', 'important');
+    b.addEventListener('mouseenter', () => bs.setProperty('background', 'rgba(0,0,0,0.08)', 'important'));
+    b.addEventListener('mouseleave', () => bs.setProperty('background', 'transparent', 'important'));
+    // 按钮不能把焦点从输入框抢走，否则输一个词就要重新点回输入框
+    b.addEventListener('mousedown', (ev) => ev.preventDefault());
+    b.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      cb();
+    });
+    bar.appendChild(b);
+    return b;
+  };
+
+  mkBtn('‹', '上一个（Shift+Enter）', () => findStep(false));
+  mkBtn('›', '下一个（Enter）', () => findStep(true));
+  mkBtn('×', '关闭查找（Esc）', () => closeFind());
+
+  // 挂 body 而不是 documentElement：input 直接作为 <html> 的子节点时，
+  // Chromium 不给它正常的光标/焦点语义，focus() 会静默失败（activeElement 仍是 body）。
+  document.body.appendChild(bar);
+
+  findBar = bar;
+  findInput = input;
+  findCount = count;
+
+  input.addEventListener('input', () => {
+    const text = input.value;
+    clearTimeout(findTimer);
+    // 每敲一个字就查一次，长页面会明显卡；180ms 是个不觉得迟、也不浪费的值
+    findTimer = setTimeout(() => {
+      if (!text) {
+        ipcRenderer.send('vr-find-stop');
+        count.textContent = '';
+        return;
+      }
+      // findNext 的语义是"开始一次新的查找会话"，所以**关键词变化时**必须是 true；
+      // 后面按 Enter 翻到下一个才是 false。用反了会表现为"有计数但按 Enter 不动"。
+      ipcRenderer.send('vr-find', { text, findNext: true, forward: true });
+    }, 180);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      findStep(!e.shiftKey);
+    }
+    // Esc 由 window 的捕获监听统一处理，这里不再重复
+  });
+}
+
+function openFind() {
+  if (!findBar) buildFindBar();
+  if (!findBar) return;
+  findOpen = true;
+  findBar.style.setProperty('display', 'flex', 'important');
+  // display 刚从 none 变过来时，同一个任务里 focus() 有时不生效（元素还没参与布局）。
+  // 用 setTimeout 而不是 requestAnimationFrame：rAF 在窗口不活跃时会被节流，
+  // 那时 Ctrl+F 刚打开查找条就会"看得见、打不进字"。
+  setTimeout(() => {
+    try {
+      findInput.focus({ preventScroll: true });
+      findInput.select();
+    } catch (_) { /* 焦点抢不到不影响后续，Enter 在 window 层兜底 */ }
+  }, 30);
+}
+
+function closeFind() {
+  findOpen = false;
+  if (findBar) findBar.style.setProperty('display', 'none', 'important');
+  if (findCount) findCount.textContent = '';
+  // clearSelection：不留下选中高亮，否则关掉查找后页面还挂着几个选区块
+  ipcRenderer.send('vr-find-stop');
+  // 焦点还给页面，不然方向键和滚动都失灵
+  try { window.focus(); } catch (_) {}
+}
+
+function findStep(forward) {
+  if (!findInput) return;
+  const text = findInput.value;
+  if (!text) return;
+  // findNext:false = 在同一次查找会话里前进/后退到下一个匹配
+  ipcRenderer.send('vr-find', { text, findNext: false, forward: !!forward });
+}
+
+ipcRenderer.on('vr-find-open', () => openFind());
+ipcRenderer.on('vr-find-result', (_e, r) => {
+  if (!findCount || !findOpen) return;
+  if (!r || !r.total) {
+    findCount.textContent = '无匹配';
+    return;
+  }
+  findCount.textContent = (r.active || 1) + '/' + r.total;
+});
 
 function buildToolbar() {
   if (!document.body) return false;
@@ -435,6 +736,7 @@ function buildToolbar() {
   const backBtn = makeBtn('‹', '后退（Alt+←）', () => ipcRenderer.send('vr-back'));
   const fwdBtn = makeBtn('›', '前进（Alt+→）', () => ipcRenderer.send('vr-forward'));
   makeBtn('↻', '刷新', () => ipcRenderer.send('vr-reload'));
+  const scrollBtn = makeBtn('⇓', '自动滚动', () => toggleAutoScroll());
   makeBtn('⋯', '打开设置面板', () => ipcRenderer.send('vr-panel'));
   makeBtn('—', '收起成小胶囊（Alt+Q）', () => ipcRenderer.send('vr-mini'));
   makeBtn('×', '关闭这个阅读层', () => ipcRenderer.send('vr-close'));
@@ -516,6 +818,115 @@ function buildToolbar() {
 
   return true;
 }
+
+// ============================================================
+// 自动滚动：长文/刷题时让页面自己往下滚，手动滚一下即暂停。
+//
+// 滚动目标不是 window 而是"当前真正在滚的容器"：很多站点把正文
+// 塞进 overflow:auto 的 div 里，滚 window 是空转。每次起滚前现找，
+// 不缓存 —— SPA 换路由后滚动容器会变。
+// ============================================================
+let scrollAnimId = null;   // 非 null = 正在自动滚动
+let scrollScroller = null; // 当前滚动容器（window 或元素）
+let scrollLastTs = 0;
+
+function findScroller() {
+  // 优先 window：绝大多数页面的滚动发生在 documentElement / body
+  const doc = document.scrollingElement || document.documentElement;
+  if (doc && doc.scrollHeight > doc.clientHeight + 1) return null; // null 表示滚 window
+
+  // window 滚不动，找内部可滚动的元素：优先找高度占比最大、正在显示的那个
+  let best = null;
+  let bestArea = 0;
+  const all = document.querySelectorAll('div, section, main, article, ul, ol, pre');
+  for (const el of all) {
+    if (el.scrollHeight <= el.clientHeight + 1) continue;
+    const cs = getComputedStyle(el);
+    if (cs.overflowY === 'visible' && cs.overflow === 'visible') continue;
+    if (cs.overflowY === 'hidden' || cs.overflow === 'hidden') continue;
+    const r = el.getBoundingClientRect();
+    if (r.height < 40) continue;
+    const area = r.width * r.height;
+    if (area > bestArea) { bestArea = area; best = el; }
+  }
+  return best;
+}
+
+function scrollStep(now) {
+  if (scrollAnimId === null) return;
+  const dt = scrollLastTs ? (now - scrollLastTs) / 1000 : 0;
+  scrollLastTs = now;
+  if (dt > 0) {
+    const scroller = scrollScroller;
+    if (scroller) {
+      scroller.scrollTop += scrollSpeed * dt;
+    } else {
+      window.scrollBy(0, scrollSpeed * dt);
+    }
+  }
+
+  // 到底了：window 或内部容器滚不动就停
+  const atBottom = scrollScroller
+    ? (scrollScroller.scrollTop + scrollScroller.clientHeight >= scrollScroller.scrollHeight - 1)
+    : (window.innerHeight + window.scrollY >= (document.scrollingElement?.scrollHeight ?? 0) - 1);
+  if (atBottom) {
+    stopAutoScroll();
+    return;
+  }
+  scrollAnimId = requestAnimationFrame(scrollStep);
+}
+
+function startAutoScroll() {
+  if (scrollAnimId !== null) return;
+  scrollScroller = findScroller();
+  scrollLastTs = 0;
+  scrollAnimId = requestAnimationFrame(scrollStep);
+  setScrollBtnActive(true);
+}
+
+function stopAutoScroll() {
+  if (scrollAnimId === null) return;
+  cancelAnimationFrame(scrollAnimId);
+  scrollAnimId = null;
+  scrollScroller = null;
+  setScrollBtnActive(false);
+}
+
+function toggleAutoScroll() {
+  if (scrollAnimId !== null) stopAutoScroll();
+  else startAutoScroll();
+}
+
+// 工具条按钮的高亮态（自动滚动中显示为激活色）
+let scrollBtnEl = null;
+function setScrollBtnActive(on) {
+  if (!scrollBtnEl) {
+    const bar = document.getElementById(BAR_ID);
+    if (!bar) return;
+    // 自动滚动按钮是"刷新"之后、"设置"之前的那个 ⇓
+    const btns = bar.querySelectorAll('[data-vr="btn"]');
+    scrollBtnEl = btns[3] || null;
+  }
+  if (scrollBtnEl) {
+    // 用 !important 压过 makeBtn 的 hover 态（否则鼠标悬停时会闪回灰色）
+    scrollBtnEl.style.setProperty('background', on ? 'rgba(37,99,235,0.16)' : 'transparent', 'important');
+    scrollBtnEl.style.setProperty('color', on ? '#2563eb' : '', 'important');
+  }
+}
+
+// 手动滚动 / 按键 / 触控板一有动作就暂停，别和用户抢控制权
+function autoScrollInterrupted() {
+  if (scrollAnimId !== null) stopAutoScroll();
+}
+// 用 capture 才能兜住被滚动容器/iframe 吃掉、不冒泡上来的 wheel
+window.addEventListener('wheel', autoScrollInterrupted, { passive: true, capture: true });
+window.addEventListener('touchmove', autoScrollInterrupted, { passive: true, capture: true });
+window.addEventListener('keydown', (e) => {
+  // 方向键 / 空格 / PageUp / PageDown / Home / End 都算用户主动滚动
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+    autoScrollInterrupted();
+  }
+}, true);
 
 const PASS_BADGE_ID = 'vr-passthrough-badge';
 
@@ -1333,6 +1744,9 @@ function scanOverlays() {
 
 function boot() {
   const ok = paintRoot() && buildFrame() && buildToolbar();
+  // 查找条平时是隐藏的，但要在启动时就建好：
+  // Ctrl+F 那一刻页面可能正忙，临时创建会慢半拍，输入框还抢不到焦点。
+  if (ok) buildFindBar();
   if (ok) {
     applyTheme();
     reportTheme();
@@ -1340,6 +1754,9 @@ function boot() {
   if (ok) {
     scanOverlays();
     decidePad();
+    // 字号要在 DOM 就绪后处理；观察器负责后续滚动加载出来的段落
+    applyFontScale();
+    watchFontNodes();
   }
   return ok;
 }
@@ -1394,10 +1811,28 @@ ipcRenderer.on('vr-veil-mode', (_e, mode) => {
   reportTheme();
 });
 
+ipcRenderer.on('vr-font', (_e, v) => {
+  if (typeof v !== 'number' || !isFinite(v)) return;
+  const next = Math.min(FONT_MAX, Math.max(FONT_MIN, v));
+  if (Math.abs(next - fontScale) < 1e-6) return;
+  fontScale = next;
+  applyFontScale();
+  // 字号变了会改变换行和溢出，横向裁剪的判定要重跑一次
+  setTimeout(tidyOverflowX, 200);
+});
+
 ipcRenderer.on('vr-bar-always', (_e, on) => {
   barAlways = !!on;
   paintBarOpacity();
 });
+
+ipcRenderer.on('vr-scroll-speed', (_e, v) => {
+  if (typeof v === 'number' && isFinite(v)) {
+    scrollSpeed = Math.min(SCROLL_MAX, Math.max(SCROLL_MIN, v));
+  }
+});
+
+ipcRenderer.on('vr-scroll-toggle', () => toggleAutoScroll());
 
 ipcRenderer.on('vr-zoom', (_e, z) => {
   if (typeof z === 'number' && isFinite(z) && z > 0) {
@@ -1452,7 +1887,27 @@ window.addEventListener('keydown', (e) => {
     ipcRenderer.send('vr-forward');
     return;
   }
+  if (e.key === 'Enter') {
+    // findInPage 被调用后，Chromium 的查找高亮机制会把焦点从输入框上抢走
+    // （实测输入完成约 200ms 后 activeElement 就从 input 掉回 body）。
+    // 所以 Enter 不能只挂在 input 的 keydown 上，得在这一层兜底：
+    // 只要查找条还开着，Enter / Shift+Enter 就翻到下一个 / 上一个。
+    if (findOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      findStep(!e.shiftKey);
+      return;
+    }
+  }
   if (e.key === 'Escape') {
+    // 查找条开着时，Esc 的语义是"关掉查找"，不是"关掉整个阅读层"。
+    // 这一层是捕获阶段，比输入框自己的 keydown 更早，所以在这里截住。
+    if (findOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeFind();
+      return;
+    }
     if (dragging) {
       dragging = false;
       ipcRenderer.send('vr-drag-stop');

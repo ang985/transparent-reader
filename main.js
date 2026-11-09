@@ -53,6 +53,7 @@ const DEFAULT_STATE = {
   onTop: true,     // 是否始终置顶
   lockSize: true,  // 锁定窗口大小：关闭拖边缘缩放的感应区，避免抢滚动条时误拖
   zoom: 1,         // 页面缩放（Ctrl+滚轮），1 = 100%
+  fontScale: 1,    // 正文字号倍率（只改文字，不改布局）
   barAlways: false, // 顶部工具条是否常亮（不随鼠标淡出）
   // 按站点记忆：{ "example.com": { alpha: 0.14, zoom: 1.2 } }
   // 只存浓度和缩放；没记录的站点用上面的全局默认值。
@@ -63,6 +64,8 @@ const DEFAULT_STATE = {
   // 必须是系统级热键（globalShortcut）—— 那种状态下页面收不到任何键盘事件。
   summonEnabled: true,
   summonAccel: 'Alt+R',
+  // 自动滚动速度（px/秒，0 = 关闭）。在渲染层跑 rAF，主进程只存配置。
+  autoScrollSpeed: 60,
 };
 
 let state = { ...DEFAULT_STATE };
@@ -82,9 +85,20 @@ const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2.4;
 const ZOOM_STEP = 1.1;
 
+// 正文字号：只缩放文字，不动布局（和 zoom 不是一回事）。
+// 范围收得比较窄 —— 再大就开始频繁折行，反而更难读。
+const FONT_MIN = 0.8;
+const FONT_MAX = 1.6;
+const FONT_STEP = 0.1;
+
 const ALPHA_MIN = 0;
 const ALPHA_MAX = 0.92;
 const ALPHA_STEP = 0.03;   // Alt+滚轮每档的浓度变化
+
+// 自动滚动速度范围（px/秒）
+const SCROLL_MIN = 15;
+const SCROLL_MAX = 300;
+const SCROLL_DEFAULT = 60;
 
 const SITE_MAX = 200;      // 站点记忆最多保留多少条
 
@@ -121,6 +135,8 @@ function loadState() {
   }
   state.alpha = clamp(state.alpha, 0, 0.92);
   state.zoom = clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX);
+  state.fontScale = clamp(state.fontScale || 1, FONT_MIN, FONT_MAX);
+  state.autoScrollSpeed = clamp(Number(state.autoScrollSpeed) || SCROLL_DEFAULT, SCROLL_MIN, SCROLL_MAX);
   state.width = clamp(state.width, MIN_W, 1600);
   state.height = clamp(state.height, MIN_H, 1400);
   if (!Array.isArray(state.history)) state.history = [];
@@ -142,6 +158,9 @@ function loadState() {
     const out = {};
     if (typeof v.alpha === 'number') out.alpha = clamp(v.alpha, 0, 0.92);
     if (typeof v.zoom === 'number') out.zoom = clamp(v.zoom, ZOOM_MIN, ZOOM_MAX);
+    // 注意：这里是白名单式重建，新加的每站点字段都必须在这里放行，
+    // 否则存进 state.json 后会在下次启动被静默丢弃。
+    if (typeof v.fontScale === 'number') out.fontScale = clamp(v.fontScale, FONT_MIN, FONT_MAX);
     if (!Object.keys(out).length) delete state.sitePrefs[k];
     else state.sitePrefs[k] = out;
   }
@@ -318,8 +337,10 @@ function createOverlay(rawUrl, opts = {}) {
       additionalArguments: [
         '--vr-alpha=' + state.alpha,
         '--vr-zoom=' + (state.zoom || 1),
+        '--vr-font=' + (state.fontScale || 1),
         '--vr-bar-always=' + (state.barAlways ? '1' : '0'),
         '--vr-veil=' + (state.veilMode || 'auto'),
+        '--vr-scroll-speed=' + state.autoScrollSpeed,
       ],
     },
   });
@@ -327,6 +348,7 @@ function createOverlay(rawUrl, opts = {}) {
   win.__st = {
     alpha: state.alpha,
     zoom: clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX),
+    fontScale: clamp(state.fontScale || 1, FONT_MIN, FONT_MAX),
     hideImages: state.hideImages,
     focus: state.focus,
     id: ++winSeq,
@@ -348,6 +370,20 @@ function createOverlay(rawUrl, opts = {}) {
 
   win.webContents.on('dom-ready', () => { applyCSS(win); syncPagePrefs(win); });
   win.webContents.on('did-finish-load', () => { applyCSS(win); syncPagePrefs(win); });
+
+  // 原生查找的结果回传给阅读层的查找条。
+  // 每次 findInPage 都会连着来几条（finalUpdate 为 false 的是中间态），
+  // 一律转发，由界面自己决定怎么显示 —— 这样"输入过程中计数不断跳"是自然的。
+  win.webContents.on('found-in-page', (_e, result) => {
+    if (win.isDestroyed() || !result) return;
+    try {
+      win.webContents.send('vr-find-result', {
+        active: result.activeMatchOrdinal || 0,
+        total: result.matches || 0,
+        final: !!result.finalUpdate,
+      });
+    } catch (_) {}
+  });
   win.webContents.on('did-fail-load', (_e, code, desc) => log(`load failed ${code} ${desc}`));
   win.webContents.on('context-menu', (e) => e.preventDefault());
 
@@ -366,6 +402,13 @@ function createOverlay(rawUrl, opts = {}) {
   });
   win.webContents.on('unresponsive', () => log('webContents unresponsive'));
   win.webContents.on('responsive', () => log('webContents responsive again'));
+
+  // 渲染进程的 console 落到 run.log：
+  // 页面里出问题时只能靠这个看，否则要么开 devtools，要么什么都看不到。
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 2) log('page[' + level + '] ' + String(message).slice(0, 400) +
+      (sourceId ? ' @' + String(sourceId).slice(-40) + ':' + line : ''));
+  });
 
   win.webContents.on('page-title-updated', (_e, title) => {
     win.__st.title = String(title || '').trim().slice(0, 40);
@@ -466,8 +509,15 @@ function createOverlay(rawUrl, opts = {}) {
   //   3. 这一层覆盖所有 frame，iframe 抢走焦点时同样有效。
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
-    if (!input.alt || input.control || input.meta || input.shift) return;
     const key = String(input.key || '').toLowerCase();
+    // Ctrl+F：页面内查找。必须在这一层拦，页面自己吞键（富文本、编辑器）
+    // 或者焦点在 iframe 里时，页面级的 keydown 收不到。
+    if (input.control && !input.alt && !input.meta && !input.shift && key === 'f') {
+      event.preventDefault();
+      try { win.webContents.send('vr-find-open'); } catch (_) {}
+      return;
+    }
+    if (!input.alt || input.control || input.meta || input.shift) return;
     if (key === 'q') {
       event.preventDefault();
       toggleMini();
@@ -481,6 +531,12 @@ function createOverlay(rawUrl, opts = {}) {
     if (key === 't') {
       event.preventDefault();
       togglePassthrough();
+    }
+    if (key === 's') {
+      // Alt+S：开/关自动滚动。滚动循环跑在渲染层（那里能找对滚动容器），
+      // 主进程只负责把按键转发过去。
+      event.preventDefault();
+      try { win.webContents.send('vr-scroll-toggle'); } catch (_) {}
     }
   });
 
@@ -574,7 +630,9 @@ function syncPagePrefs(win) {
     win.webContents.send('vr-zoom', z);
     win.webContents.send('vr-bar-always', !!state.barAlways);
     win.webContents.send('vr-alpha', win.__st.alpha);
+    win.webContents.send('vr-font', win.__st.fontScale || 1);
     win.webContents.send('vr-veil-mode', state.veilMode || 'auto');
+    win.webContents.send('vr-scroll-speed', state.autoScrollSpeed);
   } catch (_) {}
 }
 
@@ -623,6 +681,7 @@ function applySitePrefs(win, url) {
 
   if (typeof p.alpha === 'number') win.__st.alpha = clamp(p.alpha, ALPHA_MIN, ALPHA_MAX);
   if (typeof p.zoom === 'number') win.__st.zoom = clamp(p.zoom, ZOOM_MIN, ZOOM_MAX);
+  if (typeof p.fontScale === 'number') win.__st.fontScale = clamp(p.fontScale, FONT_MIN, FONT_MAX);
 
   // 这里只改窗口自己的状态；真正的应用交给 dom-ready 之后的
   // applyCSS / syncPagePrefs，避免往还没加载完的页面上插样式。
@@ -644,6 +703,23 @@ function setZoom(win, z) {
     win.webContents.send('vr-zoom', next);
   } catch (_) {}
   saveStateDebounced();
+}
+
+// 正文字号：只改文字大小，布局和图片不动。
+// 和 setZoom 的区别要说清楚：zoom 是整页缩放（连版心宽度一起变），
+// fontScale 只作用于承载文字的元素，适合"字太小但版式正好"的场景。
+function setFontScale(win, v) {
+  if (!win || win.isDestroyed()) return { ok: false };
+  const next = clamp(Math.round(Number(v) * 100) / 100, FONT_MIN, FONT_MAX);
+  if (Math.abs(next - (win.__st.fontScale || 1)) < 1e-6) return { ok: true, fontScale: next };
+  win.__st.fontScale = next;
+  state.fontScale = next;
+  rememberSite(win, { fontScale: next });
+  try { win.webContents.send('vr-font', next); } catch (_) {}
+  saveStateDebounced();
+  notifyPanel();
+  log('fontScale=' + next);
+  return { ok: true, fontScale: next };
 }
 
 function setAlpha(win, v) {
@@ -916,12 +992,14 @@ function panelState() {
     url: state.url || '',
     history: state.history || [],
     alpha: win ? win.__st.alpha : state.alpha,
+    fontScale: win ? (win.__st.fontScale || 1) : (state.fontScale || 1),
     hideImages: win ? win.__st.hideImages : state.hideImages,
     focus: win ? win.__st.focus : state.focus,
     onTop: state.onTop !== false,
     lockSize: state.lockSize !== false,
     barAlways: !!state.barAlways,
     veilMode: state.veilMode || 'auto',
+    autoScrollSpeed: state.autoScrollSpeed,
     dark: win ? !!win.__st.dark : false,
     effAlpha: win ? (typeof win.__st.eff === 'number' ? win.__st.eff : win.__st.alpha) : state.alpha,
     hasOverlay: !!win,
@@ -940,6 +1018,7 @@ function panelState() {
       key: site.key,
       alpha: typeof site.alpha === 'number' ? site.alpha : null,
       zoom: typeof site.zoom === 'number' ? site.zoom : null,
+      fontScale: typeof site.fontScale === 'number' ? site.fontScale : null,
     } : null,
   };
 }
@@ -1127,8 +1206,27 @@ ipcMain.handle('vr-opt', (_e, key, val) => {
   if (key === 'summonEnabled') {
     return setSummonEnabled(val);
   }
+  if (key === 'fontScale') {
+    if (!win) {
+      // 还没开窗口：先记为全局默认，下次开窗时随 argv 带过去
+      state.fontScale = clamp(Number(val) || 1, FONT_MIN, FONT_MAX);
+      saveState();
+      notifyPanel();
+      return { ok: true, fontScale: state.fontScale };
+    }
+    return setFontScale(win, val);
+  }
   if (key === 'summonAccel') {
     return setSummonAccel(val);
+  }
+  if (key === 'autoScrollSpeed') {
+    state.autoScrollSpeed = clamp(Number(val) || SCROLL_DEFAULT, SCROLL_MIN, SCROLL_MAX);
+    if (win) {
+      try { win.webContents.send('vr-scroll-speed', state.autoScrollSpeed); } catch (_) {}
+    }
+    saveState();
+    notifyPanel();
+    return { ok: true, autoScrollSpeed: state.autoScrollSpeed };
   }
   if (key === 'hideImages' || key === 'focus') {
     state[key] = !!val;
@@ -1146,6 +1244,34 @@ ipcMain.handle('vr-close-all', () => {
   const win = currentOverlay();
   if (win) win.close();
   return { ok: true };
+});
+
+// ---------------- 页面内查找 ----------------
+// 用 Chromium 原生的 findInPage：跨节点、富文本、Shadow DOM 都能正确匹配，
+// 而且自带"滚到匹配处 + 高亮当前项"，自己遍历 DOM 做不到这个效果。
+ipcMain.on('vr-find', (e, payload) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win.isDestroyed()) return;
+  const text = String((payload && payload.text) || '');
+  if (!text) {
+    try { win.webContents.stopFindInPage('clearSelection'); } catch (_) {}
+    return;
+  }
+  try {
+    win.webContents.findInPage(text, {
+      forward: !payload || payload.forward !== false,
+      findNext: !!(payload && payload.findNext),
+    });
+  } catch (err) {
+    log('findInPage failed: ' + err.message);
+  }
+});
+
+ipcMain.on('vr-find-stop', (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win.isDestroyed()) return;
+  // clearSelection：不留选中高亮，否则关掉查找后页面上还挂着几块选区
+  try { win.webContents.stopFindInPage('clearSelection'); } catch (_) {}
 });
 
 ipcMain.handle('vr-raise', () => summonOverlay());
@@ -1486,20 +1612,46 @@ if (!gotTheLock) {
     // 便于脚本切换和自动化验证"改键即时生效、失败能回退"。
     const hkArg = Array.isArray(argv) ? argv.find((a) => /^--vr-summon-hotkey=/.test(a)) : null;
     const sumArg = Array.isArray(argv) ? argv.find((a) => /^--vr-summon=/.test(a)) : null;
+    // --vr-font-scale=1.4：运行时改正文字号，同样走面板那条 setFontScale
+    const fontArg = Array.isArray(argv) ? argv.find((a) => /^--vr-font-scale=/.test(a)) : null;
     if (openArg) {
       const target = openArg.slice('--vr-open='.length);
       log('open requested by command line: ' + target.slice(0, 60));
       createOverlay(target);
       if (veilArg) setVeilMode(veilArg.slice('--vr-veil='.length));
+      if (fontArg) {
+        const w = currentOverlay();
+        if (w) setFontScale(w, parseFloat(fontArg.slice('--vr-font-scale='.length)));
+      }
       return;
     }
     if (veilArg) {
       setVeilMode(veilArg.slice('--vr-veil='.length));
       return;
     }
+    if (fontArg) {
+      const w = currentOverlay();
+      const r = w
+        ? setFontScale(w, parseFloat(fontArg.slice('--vr-font-scale='.length)))
+        : { ok: false, error: 'no overlay window' };
+      log('font scale by command line: ' + JSON.stringify(r));
+      return;
+    }
     if (hkArg) {
       const r = setSummonAccel(hkArg.slice('--vr-summon-hotkey='.length));
       log('summon hotkey by command line: ' + JSON.stringify(r));
+      return;
+    }
+    const scrollArg = Array.isArray(argv) ? argv.find((a) => /^--vr-scroll-speed=/.test(a)) : null;
+    if (scrollArg) {
+      const v = parseFloat(scrollArg.slice('--vr-scroll-speed='.length));
+      state.autoScrollSpeed = clamp(Number(v) || SCROLL_DEFAULT, SCROLL_MIN, SCROLL_MAX);
+      const w = currentOverlay();
+      if (w && !w.isDestroyed()) {
+        try { w.webContents.send('vr-scroll-speed', state.autoScrollSpeed); } catch (_) {}
+      }
+      saveState();
+      log('scroll speed by command line: ' + state.autoScrollSpeed);
       return;
     }
     if (sumArg) {

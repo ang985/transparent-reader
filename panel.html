@@ -514,6 +514,20 @@
         <button type="button" data-veil="dark">强制深色</button>
       </div>
 
+      <div class="slider-label" style="margin-top:14px">
+        <span>正文字号</span>
+        <b id="fontVal">100%</b>
+      </div>
+      <input id="font" class="slider" type="range" min="80" max="160" step="5" value="100" />
+      <div class="hint" id="fontHint">只放大文字，版式和图片不动。Ctrl+滚轮是整页缩放，两者可以叠加。</div>
+
+      <div class="slider-label" style="margin-top:14px">
+        <span>自动滚动速度</span>
+        <b id="scrollVal">60</b>
+      </div>
+      <input id="scroll" class="slider" type="range" min="15" max="300" step="15" value="60" />
+      <div class="hint" id="scrollHint">点击阅读层工具条的 ⇓ 开始自动滚动；手动滚一下或按方向键即暂停。单位：像素/秒。</div>
+
       <div class="divider"></div>
 
       <div class="switch">
@@ -610,6 +624,10 @@
   const url = $('url');
   const alpha = $('alpha');
   const alphaVal = $('alphaVal');
+  const font = $('font');
+  const fontVal = $('fontVal');
+  const scroll = $('scroll');
+  const scrollVal = $('scrollVal');
   const hideImages = $('hideImages');
   const onTop = $('onTop');
   const lockSize = $('lockSize');
@@ -635,6 +653,22 @@
     const p = Math.round((v / 92) * 100);
     alpha.style.background = 'linear-gradient(to right, var(--brand) ' + p + '%, #e3e6eb ' + p + '%)';
     alphaVal.textContent = v + '%';
+  }
+
+  // 字号滑块 80%–160%，填充比例要按区间算，不能直接用 v/160
+  function paintFontSlider() {
+    const v = Number(font.value) || 100;
+    const p = Math.round(((v - 80) / 80) * 100);
+    font.style.background = 'linear-gradient(to right, var(--brand) ' + p + '%, #e3e6eb ' + p + '%)';
+    fontVal.textContent = v + '%';
+  }
+
+  // 自动滚动速度滑块 15–300 px/秒
+  function paintScrollSlider() {
+    const v = Number(scroll.value) || 60;
+    const p = Math.round(((v - 15) / 285) * 100);
+    scroll.style.background = 'linear-gradient(to right, var(--brand) ' + p + '%, #e3e6eb ' + p + '%)';
+    scrollVal.textContent = v;
   }
 
   function shortLabel(u) {
@@ -703,13 +737,14 @@
     const box = $('siteNote');
     const txt = $('siteText');
     if (!box || !txt) return;
-    if (!site || (site.alpha == null && site.zoom == null)) {
+    if (!site || (site.alpha == null && site.zoom == null && site.fontScale == null)) {
       box.hidden = true;
       return;
     }
     const parts = [];
     if (site.alpha != null) parts.push('浓度 <b>' + Math.round(site.alpha * 100) + '%</b>');
     if (site.zoom != null) parts.push('缩放 <b>' + Math.round(site.zoom * 100) + '%</b>');
+    if (site.fontScale != null) parts.push('字号 <b>' + Math.round(site.fontScale * 100) + '%</b>');
     txt.innerHTML = '已单独记住 <b>' + site.key + '</b>：' + parts.join(' · ');
     box.hidden = false;
   }
@@ -719,6 +754,10 @@
     if (s.url && !url.value) url.value = s.url;
     alpha.value = Math.round((s.alpha || 0) * 100);
     paintSlider();
+    font.value = Math.round((s.fontScale || 1) * 100);
+    paintFontSlider();
+    scroll.value = Math.round(s.autoScrollSpeed || 60);
+    paintScrollSlider();
     hideImages.checked = !!s.hideImages;
     focus.checked = !!s.focus;
     onTop.checked = s.onTop !== false;
@@ -916,6 +955,16 @@
     window.vr.setAlpha(Number(alpha.value) / 100);
   });
 
+  font.addEventListener('input', () => {
+    paintFontSlider();
+    window.vr.setOpt('fontScale', Number(font.value) / 100);
+  });
+
+  scroll.addEventListener('input', () => {
+    paintScrollSlider();
+    window.vr.setOpt('autoScrollSpeed', Number(scroll.value));
+  });
+
   hideImages.onchange = () => window.vr.setOpt('hideImages', hideImages.checked);
   focus.onchange = () => window.vr.setOpt('focus', focus.checked);
   onTop.onchange = () => window.vr.setOpt('onTop', onTop.checked);
@@ -936,6 +985,7 @@
   window.vr.onState(applyState);
   window.vr.getState().then(applyState);
   paintSlider();
+  paintFontSlider();
 </script>
 </body>
 </html>

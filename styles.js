@@ -146,11 +146,18 @@ img, picture, video, canvas, iframe, object, embed, figure,
 [style*="background: url"]:not(html):not(body):not([data-vr-card]):not([data-vr-raw]) { display: none !important; }
 `;
 
+  // 专注模式：隐藏页头、导航、广告、评论区。
+  //
+  // 前面必须加 `html body`，并且整体用 :is() 收拢 —— 这不是为了权重，是防误伤：
+  // 原来这些属性选择器是裸的，`[class*="ad-"]` 会匹配到**我们自己**加在 <html> 上的
+  // `vr-pad-body`（v r - p "ad-" b o d y），于是整页 html 被 display:none，
+  // 屏幕上只剩一层透明的空窗 —— 用户看到的就是"页面没加载出来"。
+  // 加上 html body 前缀后，这些规则只作用于 body 内部，永远碰不到 <html> 本身。
   const focus = `
-header, footer, nav, aside, [role="banner"], [role="navigation"], [role="complementary"],
+html body :is(header, footer, nav, aside, [role="banner"], [role="navigation"], [role="complementary"],
 [class*="advert"], [id*="advert"], [class*="ads-"], [class*="-ads"], [class*="ad-"],
 [class*="cookie"], [class*="sidebar"], [class*="share"],
-[class*="recommend"], [class*="related"], [class*="comment"] { display: none !important; }
+[class*="recommend"], [class*="related"], [class*="comment"]) { display: none !important; }
 `;
 
   // ---- 深色页面 ----

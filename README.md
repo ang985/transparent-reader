@@ -53,6 +53,8 @@ npm start
 | `Alt+P` | Summon the control panel from the overlay or the pill |
 | `Alt` + wheel | Background opacity: scroll up = more solid, down = more transparent |
 | `Alt+T` | Toggle temporary click-through (mouse reaches the window underneath) |
+| `Alt+S` | Start / stop auto-scroll (manual scroll or an arrow key pauses it) |
+| `Ctrl+F` | Find in page (Enter / Shift+Enter to jump) |
 | `Ctrl` + wheel | Zoom the page (the toolbar does not zoom) |
 | `Alt+←` / `Alt+→` | Go back / forward |
 | Summon hotkey (default `Alt+R`, rebindable) | Brings the overlay to the front and focuses it while another app covers it. Rebind or disable it in the control panel |
@@ -129,6 +131,8 @@ npm start
 | `Alt+P` | 从阅读层或胶囊唤出控制面板 |
 | `Alt` + 滚轮 | 调背景浓度：上滚更浓、下滚更淡 |
 | `Alt + T` | 临时穿透：鼠标点到下层窗口，再按一次退出 |
+| `Alt + S` | 自动滚动：开 / 关（手动滚动或按方向键即暂停） |
+| `Ctrl+F` | 页面内查找（Enter / Shift+Enter 跳转上/下一个） |
 | `Ctrl+滚轮` | 页面缩放（工具条不跟着缩放） |
 | `Alt+←` / `Alt+→` | 页面后退 / 前进 |
 | 全局唤出热键（默认 `Alt+R`，可改） | 窗口被别的程序盖住、或根本没有焦点时，按一下把它提到最前并聚焦。在控制面板里可改键或关闭 |
