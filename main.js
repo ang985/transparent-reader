@@ -419,6 +419,7 @@ function createOverlay(rawUrl, opts = {}) {
   };
 
   win.setAlwaysOnTop(state.onTop !== false, state.onTop !== false ? 'screen-saver' : 'normal');
+  win.__topLevel = state.onTop !== false ? 'screen-saver' : 'normal';
   win.setMenuBarVisibility(false);
   win.setSkipTaskbar(true);
 
@@ -736,10 +737,30 @@ function hideOtherOverlays(keep) {
   }
 }
 
+// 切页签的顺序：先把新窗口显示出来，**同一步里**把其它页签藏掉。
+// 顺序绝不能反 —— 先藏旧的再显示新的，中间会漏出一帧桌面（抓帧抓到过整屏壁纸）。
+//
+// 这段历史值得记一下，免得以后又走回头路。试过三种"等新窗口画好了再藏旧的"：
+//   1. 两次 rAF 当信号：Chromium 对被遮挡窗口的 rAF 不是帧同步的，
+//      没出帧也会回调，等于没等；
+//   2. capturePage() 预热：不会强制整页光栅化，反而让切换多等 200ms；
+//   3. 固定延时 240ms：两个窗口同屏 240ms，两张半透明页面叠在一起是"糊"，
+//      比闪一下更难看（用户会读成两页文字搅在一起）。
+// 实测（520×780 纯文本页，逐帧采样）：show 之后约 110ms 新页签已完成 92%，
+// 300ms 完全稳定。这期间旧窗口已经藏掉，屏幕上只是新页面在补剩余像素，
+// 既没有桌面、也没有重影。所以：立即藏，只留一个"还是不是当前页签"的判断，
+// 防止等待期间用户又切走了，反过来把当前页签藏掉。
+function hideOtherTabs(win) {
+  if (!win || win.isDestroyed() || !win.__st) return;
+  if (activeTabId !== win.__st.tabId) return;
+  hideOtherOverlays(win);
+}
+
 // 切到某个页签：摆位置 → 显示并拿焦点 → 藏掉其它 → 广播页签列表。
 // 顺序不能反：先显示新的再隐藏旧的，中间那一帧才不会露出桌面。
 function activateTab(win) {
   if (!win || win.isDestroyed() || !win.__st) return;
+  const mine = win.__st.tabId;
 
   const b = overlayBounds();
   let cur = null;
@@ -754,33 +775,47 @@ function activateTab(win) {
     } catch (_) {}
   }
 
-  win.setAlwaysOnTop(state.onTop !== false, state.onTop !== false ? 'screen-saver' : 'normal');
-  // 切页签是用户主动操作，焦点必须跟过来；只 moveTop 会让键盘还留在旧窗口上
+  // 置顶层级只有变化时才重新设置：同一个值再设一次会走一遍 SetWindowPos，
+  // 透明窗口会因此重画一帧 —— 切页签时的"闪"有它一份。
+  const wantTop = state.onTop !== false;
+  const wantLevel = wantTop ? 'screen-saver' : 'normal';
+  if (win.__topLevel !== wantLevel) {
+    win.setAlwaysOnTop(wantTop, wantLevel);
+    win.__topLevel = wantLevel;
+  }
+
+  activeTabId = mine;
+  overlayWin = win;
+  lastActive = win;
+
+  // 切页签是用户主动操作，焦点必须跟过来；只 moveTop 会让键盘还留在旧窗口上。
   if (!win.isVisible()) win.show();
   win.moveTop();
   try { win.focus(); } catch (_) { /* ignore */ }
   try { win.webContents.focus(); } catch (_) { /* ignore */ }
+  // show() 之后同一步里就把别的窗口收掉（顺序反了会漏一帧桌面，见 hideOtherTabs 注释）
+  hideOtherTabs(win);
 
-  activeTabId = win.__st.tabId;
-  overlayWin = win;
-  lastActive = win;
-  hideOtherOverlays(win);
-  // 这个页签在后台待着的时候，用户可能改过全局设置（浓度、字号、蒙版、自动滚动速度），
-  // 切回来得把这些补发一次，否则它还是创建时那套旧参数。
+  // 这个页签在后台待着的时候，用户可能改过全局设置（浓度、字号、蒙版、
+  // 自动滚动速度），切回来得把这些补发一次，否则它还是创建时那套旧参数。
   syncPagePrefs(win);
 
-  log('tab activate #' + win.__st.tabId + ' visible=' + win.isVisible() +
+  log('tab activate #' + mine + ' visible=' + win.isVisible() +
     ' top=' + win.isAlwaysOnTop() + ' total=' + overlays.size);
 
-  // 透明窗口刚显示时有时会被别的置顶窗口压住，300ms 后再抬一次
+  // 只在"真的被别的置顶窗口压下去"时才补抬一次；
+  // 无条件 applyTop + moveTop 会平白搅动一次 z 序，同样会闪。
   setTimeout(() => {
-    if (win.isDestroyed() || activeTabId !== win.__st.tabId) return;
-    applyTop(win);
-    win.moveTop();
+    if (win.isDestroyed() || activeTabId !== mine) return;
+    if (state.onTop !== false && !win.isAlwaysOnTop()) {
+      applyTop(win);
+      win.moveTop();
+    }
   }, 300);
 
   // 页签列表要在三个时间点各补发一次：窗口刚创建时 preload 可能还没注册监听，
   // 只发一次会丢，表现就是"页签条永远是空的 / 少一个标签"。
+  // 页签条那边会按内容去重，同样的列表不会重复重建 DOM。
   sendTabs();
   setTimeout(sendTabs, 700);
   setTimeout(sendTabs, 2000);
@@ -809,8 +844,11 @@ function cycleTab(dir) {
 function applyTop(win) {
   if (!win || win.isDestroyed()) return;
   const on = state.onTop !== false;
+  const level = on ? 'screen-saver' : 'normal';
+  if (win.__topLevel === level) return;   // 同值重设会白重画一帧
   try {
-    win.setAlwaysOnTop(on, on ? 'screen-saver' : 'normal');
+    win.setAlwaysOnTop(on, level);
+    win.__topLevel = level;
   } catch (_) {}
 }
 
@@ -834,12 +872,24 @@ function raiseOverlay(target) {
 
   try {
     if (!win.isVisible()) win.show();
-    win.setAlwaysOnTop(true, 'screen-saver');
+    // 已经是置顶就别再设一遍：setAlwaysOnTop 会走 SetWindowPos，透明窗口
+    // 会因此重画一帧，热键连按时看着就是"闪"。
+    if (!win.isAlwaysOnTop()) {
+      win.setAlwaysOnTop(true, 'screen-saver');
+      win.__topLevel = 'screen-saver';
+    }
     win.moveTop();
+    // 被抬起来的这一扇就是新的当前页签 —— 先把指针改过来，
+    // 后面 hideOtherTabs 才会按"当前页签"去收其它窗口。
+    if (win.__st) {
+      activeTabId = win.__st.tabId;
+      overlayWin = win;
+      lastActive = win;
+    }
     // 多页签时把其它 tab 的窗口收起来，避免叠窗。
     // 这一句是"最多一个浮层可见"不变式的最后一道保险 —— 任何显示路径
     // 最终都会走到 raiseOverlay，漏掉这里就会有第二个窗口留在屏幕上。
-    hideOtherOverlays(win);
+    hideOtherTabs(win);
     // 只 moveTop 是"视觉上在最前"，键盘焦点仍在别的程序上，
     // 于是看着窗口在顶层，按 Alt+Q 却毫无反应。
     // 这里把焦点真正拿过来：app.focus({steal:true}) 用于突破 Windows 的前台锁定。
@@ -856,6 +906,7 @@ function raiseOverlay(target) {
       if (!win.isDestroyed() && state.onTop === false) {
         try {
           win.setAlwaysOnTop(false);
+          win.__topLevel = 'normal';
         } catch (_) {}
       }
     }, 1200);
@@ -1685,7 +1736,8 @@ function expandOverlay() {
       try { win.setBounds(miniBounds); } catch (_) { /* ignore */ }
     }
     win.showInactive();
-    hideOtherOverlays(win);      // 展开只留这一个，其它页签的窗口一律收起
+    // 先让这一扇显示出来，再收其它窗口 —— 顺序反了会先露一帧桌面
+    hideOtherTabs(win);
   }
   const m = miniWin;
   miniWin = null;
@@ -1964,6 +2016,14 @@ if (!gotTheLock) {
       try { saveState(); } catch (_) { /* ignore */ }
       app.quit();
       return;
+    }
+    // 排查"切页签要几百毫秒才画完"这类问题时，先确认到底走的是 GPU 还是软件光栅。
+    // 软件光栅下大页面重绘会慢一个数量级，症状和这里很像。
+    if (process.env.VR_DIAG === '1') {
+      // 刚 ready 时 GPU 进程可能还没起来，这里查到的会是 software —— 延后再查一次。
+      setTimeout(() => {
+        try { log('gpu: ' + JSON.stringify(app.getGPUFeatureStatus())); } catch (_) {}
+      }, 3000);
     }
     createTray();
     startBarWatch();

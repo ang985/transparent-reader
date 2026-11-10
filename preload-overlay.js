@@ -946,8 +946,15 @@ function renderTabs(payload) {
 // 缓存最近一次收到的列表：工具条可能是"后建"的（boot 重试），
 // 建好后要立刻按缓存画一次，否则会空着等下一次广播。
 let lastTabsPayload = null;
+let lastTabsKey = '';
 ipcRenderer.on('vr-tabs', (_e, payload) => {
+  // 主进程会在 0 / 700 / 2000ms 各推一次（防止 preload 还没注册监听时那条丢在
+  // 半路），列表其实一模一样。不比对的话每次切页签都要把 DOM 清空重画三遍，
+  // 页签条就会"一闪一闪"。这里只在内容真的变了才重建。
+  const key = JSON.stringify((payload && payload.list) || []);
   lastTabsPayload = payload;
+  if (key === lastTabsKey) return;
+  lastTabsKey = key;
   renderTabs(payload);
 });
 
