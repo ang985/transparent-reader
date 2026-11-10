@@ -696,8 +696,22 @@ function buildToolbar() {
   handle.textContent = '阅读层';
   bar.appendChild(handle);
 
-  // 页签条已移除（单窗口模式）：这里原本放标签，现在留出的整段空白
-  // 都当作拖动区，工具条比之前更好拖。
+  const tabsWrap = document.createElement('div');
+  tabsWrap.id = 'vr-tabs';
+  tabsWrap.style.flex = '0 1 auto';
+  tabsWrap.style.maxWidth = '56%';
+  tabsWrap.style.display = 'flex';
+  tabsWrap.style.alignItems = 'center';
+  tabsWrap.style.gap = '4px';
+  tabsWrap.style.height = '100%';
+  tabsWrap.style.overflow = 'hidden';
+  tabsWrap.style.setProperty('-webkit-app-region', 'no-drag');
+  tabsWrap.style.cursor = 'default';
+  bar.appendChild(tabsWrap);
+
+  // 页签右边的空白留作拖动区。
+  // 整条 bar 是 drag，页签容器是 no-drag，所以必须留一块 flex:1 的拖动区，
+  // 否则把 handle 固定成 52px 之后，整条工具条只剩最左边能拖 —— 老 bug。
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
   spacer.style.height = '100%';
@@ -815,11 +829,128 @@ function buildToolbar() {
   paintBarOpacity();
   tidyOverflowX();
   try { ipcRenderer.send('vr-prefs-ask'); } catch (_) {}
+  // 工具条如果是"第二次 boot 才建起来"的，把缓存的页签列表立刻画出来，
+  // 不然要等到下一次主进程广播（切页签/改标题）才会出现。
+  if (lastTabsPayload) renderTabs(lastTabsPayload);
 
   return true;
 }
 
 // ============================================================
+// 页签条
+//
+// 每个页签是一个独立的 BrowserWindow，各自跑一份 preload，窗口之间不共享 DOM。
+// 所以列表由主进程算好（sendTabs）推给**每个**窗口，这里只负责画。
+// 注意 #vr-tabs 在 buildToolbar 里、页面刚加载时可能还不存在（boot 之前就收到
+// 消息），renderTabs 里判空直接返回，等 dom-ready 后主进程补发的那几次。
+// ============================================================
+function renderTabs(payload) {
+  const wrap = document.getElementById('vr-tabs');
+  if (!wrap) return;
+  wrap.textContent = '';
+
+  const list = payload && Array.isArray(payload.list) ? payload.list : [];
+
+  list.slice(0, 8).forEach((t) => {
+    const chip = document.createElement('div');
+    const s = chip.style;
+    s.maxWidth = '110px';
+    s.minWidth = '30px';
+    s.height = '20px';
+    s.display = 'flex';
+    s.alignItems = 'center';
+    s.padding = '0 3px 0 7px';
+    s.borderRadius = '4px';
+    s.fontSize = '11.5px';
+    s.whiteSpace = 'nowrap';
+    s.overflow = 'hidden';
+    s.cursor = 'default';
+    s.setProperty('-webkit-app-region', 'no-drag');
+    if (t.active) {
+      s.background = 'rgba(11,78,162,.16)';
+      s.color = '#0b4ea2';
+      s.fontWeight = '600';
+    } else {
+      s.background = 'rgba(0,0,0,.07)';
+      s.color = '#3a3f47';
+    }
+
+    const label = document.createElement('span');
+    label.textContent = String(t.title || '').slice(0, 14) || '新页签';
+    label.title = t.title || '';
+    label.style.flex = '1';
+    label.style.overflow = 'hidden';
+    label.style.textOverflow = 'ellipsis';
+    label.style.whiteSpace = 'nowrap';
+    chip.appendChild(label);
+
+    const close = document.createElement('span');
+    close.textContent = '×';
+    close.title = '关闭这个页签';
+    close.style.flex = 'none';
+    close.style.fontSize = '12px';
+    close.style.lineHeight = '1';
+    close.style.padding = '0 2px';
+    close.style.opacity = '0.5';
+    close.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    close.addEventListener('mouseenter', () => { close.style.opacity = '1'; });
+    close.addEventListener('mouseleave', () => { close.style.opacity = '0.5'; });
+    close.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ipcRenderer.send('vr-tab-close', t.id);
+    });
+    chip.appendChild(close);
+
+    if (!t.active) {
+      chip.addEventListener('mouseenter', () => { s.background = 'rgba(0,0,0,.13)'; });
+      chip.addEventListener('mouseleave', () => { s.background = 'rgba(0,0,0,.07)'; });
+    }
+    chip.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    chip.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!t.active) ipcRenderer.send('vr-tab-activate', t.id);
+    });
+
+    wrap.appendChild(chip);
+  });
+
+  const plus = document.createElement('div');
+  plus.textContent = '+';
+  plus.title = '打开新页签';
+  const ps = plus.style;
+  ps.flex = 'none';
+  ps.width = '18px';
+  ps.height = '18px';
+  ps.display = 'flex';
+  ps.alignItems = 'center';
+  ps.justifyContent = 'center';
+  ps.borderRadius = '3px';
+  ps.fontSize = '14px';
+  ps.lineHeight = '1';
+  ps.color = '#3a3f47';
+  ps.cursor = 'default';
+  ps.setProperty('-webkit-app-region', 'no-drag');
+  plus.addEventListener('mousedown', (ev) => ev.stopPropagation());
+  plus.addEventListener('mouseenter', () => { ps.background = 'rgba(0,0,0,.10)'; });
+  plus.addEventListener('mouseleave', () => { ps.background = 'transparent'; });
+  plus.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    ipcRenderer.send('vr-tab-new');
+  });
+  wrap.appendChild(plus);
+}
+
+// 缓存最近一次收到的列表：工具条可能是"后建"的（boot 重试），
+// 建好后要立刻按缓存画一次，否则会空着等下一次广播。
+let lastTabsPayload = null;
+ipcRenderer.on('vr-tabs', (_e, payload) => {
+  lastTabsPayload = payload;
+  renderTabs(payload);
+});
+
 // 自动滚动：长文/刷题时让页面自己往下滚，手动滚一下即暂停。
 //
 // 滚动目标不是 window 而是"当前真正在滚的容器"：很多站点把正文

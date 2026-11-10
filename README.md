@@ -15,7 +15,7 @@ A transparent, always-on-top reading overlay built with Electron: it strips the 
 ### Features
 
 - **Transparent reading layer** — page backgrounds are wiped out while text stays sharp and readable (with a subtle text-shadow halo), floating above other applications
-- **One reading layer, one window** — opening another URL navigates the same overlay instead of stacking a second window; back / forward / reload built into the toolbar. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
+- **Tabs** — every URL gets its own tab, so opening a new page no longer replaces the one you were reading; click a chip to switch, × to close, + to open another. `target=_blank` links also land in a new tab. Only the active tab is on screen — two overlay windows never stack. Launching the app opens only the control panel — the reading layer appears when you hit Open, with your last URL pre-filled
 - **Per-site memory** — each site remembers its own opacity and zoom; switch sites and the settings follow you
 - **Dark pages adapted** — works even on SPAs that rewrite the `<html>` element (Luogu, Vue/React apps): the page's own background is detected and the overlay flips to a dark veil with light text; opacity for dark pages is floored at 55% so light text stays readable, and the panel always shows the value actually used. You can also force light/dark from the panel
 - **Opacity & focus controls** — a settings panel to adjust background opacity, hide images, and enable focus mode
@@ -55,6 +55,8 @@ npm start
 | `Alt+T` | Toggle temporary click-through (mouse reaches the window underneath) |
 | `Alt+S` | Start / stop auto-scroll (manual scroll or an arrow key pauses it) |
 | `Ctrl+F` | Find in page (Enter / Shift+Enter to jump) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+1` … `Ctrl+8`, `Ctrl+9` | Jump to tab n / last tab |
 | `Ctrl` + wheel | Zoom the page (the toolbar does not zoom) |
 | `Alt+←` / `Alt+→` | Go back / forward |
 | Summon hotkey (default `Alt+R`, rebindable) | Brings the overlay to the front and focuses it while another app covers it. Rebind or disable it in the control panel |
@@ -94,7 +96,7 @@ MIT
 ### 功能特性
 
 - **透明阅读层**：网页背景被抹掉，文字保留清晰可读（带光晕描边），浮在其它应用之上
-- **单窗口单页面**：换网址只在同一个阅读层里跳转，不会叠出第二个窗口；工具条带前进 / 后退 / 刷新。启动只开控制面板，点「打开」才出现阅读层（上次的网址已自动填好）
+- **多页签**：每个网址一个页签，新开页面不会把正在读的那一页顶掉；工具条上点标签切换、点 × 关闭、点 + 新开。页面里 `target=_blank` 的链接同样落到新页签。同一时刻只显示当前页签，不会叠出两个窗口
 - **按站点记忆**：每个网站单独记住自己的浓度和缩放，换站点自动套回来；面板上会标注“已单独记住 xxx”
 - **深色页面自动适配**（含洛谷这类会改写 `<html>` 的 SPA）：识别页面自己的底色，深色站点自动切成深色蒙版 + 浅色文字；深色页浓度最低按 55% 渲染（否则浅字浮在浅底上看不清），面板会如实写明实际值，也可手动「强制浅色 / 强制深色」
 - **浓度与专注**：控制面板可调背景浓度、隐藏图片、开启专注模式
@@ -133,6 +135,8 @@ npm start
 | `Alt + T` | 临时穿透：鼠标点到下层窗口，再按一次退出 |
 | `Alt + S` | 自动滚动：开 / 关（手动滚动或按方向键即暂停） |
 | `Ctrl+F` | 页面内查找（Enter / Shift+Enter 跳转上/下一个） |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | 下一个 / 上一个页签 |
+| `Ctrl+1` … `Ctrl+8`，`Ctrl+9` | 跳到第 n 个页签 / 最后一个页签 |
 | `Ctrl+滚轮` | 页面缩放（工具条不跟着缩放） |
 | `Alt+←` / `Alt+→` | 页面后退 / 前进 |
 | 全局唤出热键（默认 `Alt+R`，可改） | 窗口被别的程序盖住、或根本没有焦点时，按一下把它提到最前并聚焦。在控制面板里可改键或关闭 |
