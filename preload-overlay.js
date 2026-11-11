@@ -150,10 +150,14 @@ function paintRoot() {
   const el = rootStyleEl();
   if (!el) return false;
   // :not(.vr-probe) —— 探测页面自身底色时先让这条失效，否则读到的永远是我们自己的蒙版
-  el.textContent =
+  const css =
     ':root:not(.vr-probe){background-color:' + veilColor() + ' !important;'
     + 'color-scheme:' + (veilDark ? 'dark' : 'light') + ' !important;}'
     + ':root body,:root body *{text-shadow:' + formatShadow(shadowFor(effectiveVeil())) + ' !important;}';
+  // 只有内容真的变了才写。哪怕写进去的是一模一样的字符串，Chromium 也会
+  // 认定样式表发生变更，对 `:root body *` 这种匹配全页元素的规则做一次全页
+  // 样式重算 + 重绘 —— 切页签时那几百毫秒的"渐进上色"就是这么来的。
+  if (el.textContent !== css) el.textContent = css;
   if (document.body) {
     document.body.style.setProperty('background-color', 'transparent', 'important');
   }
@@ -2063,15 +2067,23 @@ window.addEventListener('resize', () => {
 });
 
 ipcRenderer.on('vr-alpha', (_e, v) => {
-  if (typeof v === 'number' && isFinite(v)) {
-    veil = Math.min(0.92, Math.max(0, v));
-    paintRoot();
-    reportTheme();   // 深色页有下限，实际值可能和滑块不同，要让面板知道
-  }
+  if (typeof v !== 'number' || !isFinite(v)) return;
+  const next = Math.min(0.92, Math.max(0, v));
+  // 切页签时主进程会补发一遍偏好，值通常没变。原来这里无条件 paintRoot
+  // + reportTheme，等于每次切换都强制整页重算；值没变就什么都不做。
+  if (Math.abs(next - veil) < 1e-6) return;
+  veil = next;
+  paintRoot();
+  reportTheme();   // 深色页有下限，实际值可能和滑块不同，要让面板知道
 });
 
 ipcRenderer.on('vr-veil-mode', (_e, mode) => {
-  veilMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+  const next = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+  // 初始值来自 --vr-veil，主题判定由 applyTheme() 在页面就绪/结构变化时做。
+  // 收到相同值时不要去动 DOM：detectDark() 会临时加 .vr-probe、读计算样式，
+  // 是一次强制同步布局，切页签时的卡顿有它一份。
+  if (next === veilMode) return;
+  veilMode = next;
   veilDark = detectDark();
   paintRoot();
   // 这里必须上报。主进程靠 vr-theme 决定"插/摘暗色样式表"，

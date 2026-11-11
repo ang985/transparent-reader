@@ -303,6 +303,12 @@ let cssSeq = 0;
 
 async function applyCSS(win) {
   if (!win || win.isDestroyed()) return;
+  // dom-ready 和 did-finish-load 都会走到这里，原来每次都把整张基础样式表
+  // 摘掉再插回去 —— 这是全页重绘，同一次导航里做两遍纯属浪费，而且正好
+  // 撞上新窗口显示那一刻。内容由 hideImages/focus 决定，导航序号区分文档。
+  const key = [win.__navSeq || 0, !!win.__st.hideImages, !!win.__st.focus].join('|');
+  if (win.__cssAppliedKey === key && win.__cssKey) return;
+  win.__cssAppliedKey = key;   // 先占位，挡住两个事件并发时的第二次插入
   const tag = ++cssSeq;
   const css = buildCSS(win.__st);
   try {
@@ -327,6 +333,7 @@ async function applyCSS(win) {
     win.__cssKey = newKey;
     if (win.__st.dark) await setDarkSheet(win, true);
   } catch (e) {
+    win.__cssAppliedKey = null;   // 插入失败要让下一次有机会重试
     log('insertCSS failed: ' + e.message);
   }
 }
@@ -365,6 +372,9 @@ function createOverlay(rawUrl, opts = {}) {
   // 之前"换网址就 loadURL 复用同一个窗口"的设计会让新页面把原来的顶掉，
   // 用户想对照着看两篇就没办法了。
   const b = overlayBounds();
+  // 创建时是否已经存在别的页签（此时还没把 win 加进 overlays）。
+  // 后续页签一律由 activateTab 负责显示，见下面 reveal 里的判断。
+  const hasExisting = overlays.size > 0;
 
   const win = new BrowserWindow({
     x: b.x,
@@ -480,6 +490,14 @@ function createOverlay(rawUrl, opts = {}) {
   });
   win.webContents.on('did-navigate', (_e, u) => {
     win.__st.url = u;
+    // document 换了：之前 insertCSS 的表、补发给 preload 的偏好都随旧文档
+    // 一起失效。清掉去重标记，随后的 dom-ready 才会重新插一次、重发一次。
+    // SPA 的 did-navigate-in-page 不换 document，所以那边不清。
+    win.__navSeq = (win.__navSeq || 0) + 1;
+    win.__prefsSnap = null;
+    win.__cssAppliedKey = null;
+    win.__cssKey = null;
+    win.__darkKey = null;
     // 换了站点就把该站点记住的浓度/缩放套上来；
     // 具体应用发生在随后的 dom-ready（applyCSS / syncPagePrefs）
     applySitePrefs(win, u);
@@ -496,6 +514,11 @@ function createOverlay(rawUrl, opts = {}) {
   let revealed = false;
   const reveal = () => {
     if (win.isDestroyed()) return;
+    // 已经有别的页签时，这个窗口由 createOverlay 末尾的 swap/activateTab
+    // 统一显示。原来 ready-to-show 会先 raiseOverlay 一次、dom-ready 后
+    // activateTab 又来一次、400ms 兜底再 raiseOverlay 一次 —— 三次显隐搅动，
+    // 就是"已有窗口时打开新链接会闪"的主因。
+    if (hasExisting) return;
     // 不是当前页签就别冒头：否则后台加载完的页签会自己跳出来，
     // 屏幕上立刻变成两个窗口叠着。
     if (win.__st.tabId !== activeTabId) return;
@@ -509,9 +532,13 @@ function createOverlay(rawUrl, opts = {}) {
       raiseOverlay(win);
       return;
     }
-    if (!win.isVisible()) win.showInactive();
-    applyTop(win);
-    win.moveTop();
+    // 兜底只负责"还没露出来"的情况。窗口已经可见时再 applyTop / moveTop
+    // 只是白白搅动一次 z 序，透明窗口会因此重画一帧。
+    if (!win.isVisible()) {
+      win.showInactive();
+      applyTop(win);
+      win.moveTop();
+    }
   };
   win.once('ready-to-show', reveal);
   // 透明窗口不一定会触发 ready-to-show，必须加时间兜底
@@ -671,8 +698,9 @@ function createOverlay(rawUrl, opts = {}) {
     return win;
   }
 
-  // 第一个页签必须立刻显示；后续新页签等页面画出第一帧再切换，
-  // 否则会看到"旧页签消失 → 空白 → 新页面"的闪白。
+  // 第一个页签必须立刻显示；后续新页签等页面**加载完**再切换。
+  // 原来用 dom-ready + 60ms：真实站点那时 CSS/图片还在陆续到位、DOM 也在
+  // 重排，切过去看到的就是半成品一点点补画，即用户说的"闪"。
   if (overlays.size === 1) {
     activateTab(win);
   } else {
@@ -682,8 +710,9 @@ function createOverlay(rawUrl, opts = {}) {
       switched = true;
       activateTab(win);
     };
-    win.webContents.once('dom-ready', () => setTimeout(swap, 60));
-    setTimeout(swap, 2500);
+    win.webContents.once('did-finish-load', () => setTimeout(swap, 120));
+    // 长连接 / SPA 可能一直不触发 did-finish-load，留个兜底
+    setTimeout(swap, 3000);
   }
   return win;
 }
@@ -932,6 +961,16 @@ function refresh(win) {
 function syncPagePrefs(win) {
   if (!win || win.isDestroyed()) return;
   const z = clamp(win.__st.zoom || 1, ZOOM_MIN, ZOOM_MAX);
+  // 切页签、关页签、打开新链接都会调到这里。原来无条件重设缩放并补发
+  // 7 条 IPC，渲染层收到 vr-alpha 就重写整页样式规则 —— 等于每次都整页重绘。
+  // 值没变就整批跳过；导航后 __navSeq 变了（或 __prefsSnap 被清空）才重发，
+  // 保证新 document 的 preload 仍能拿到正确初值。
+  const snap = [
+    win.__navSeq || 0, z, !!state.barAlways, win.__st.alpha,
+    win.__st.fontScale || 1, state.veilMode || 'auto', state.autoScrollSpeed,
+  ].join('|');
+  if (win.__prefsSnap === snap) return;
+  win.__prefsSnap = snap;
   try {
     win.webContents.setZoomFactor(z);
   } catch (_) {}
