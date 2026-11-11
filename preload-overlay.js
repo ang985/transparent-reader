@@ -658,6 +658,20 @@ ipcRenderer.on('vr-find-result', (_e, r) => {
   findCount.textContent = (r.active || 1) + '/' + r.total;
 });
 
+// WebContentsView 里 -webkit-app-region:drag 不再传给宿主窗口，
+// 所以在专门的拖动区上用已有的 IPC 拖动补回来。绑在元素本身而不是靠
+// window 捕获阶段的 e.target 猜测，避免边框/文本节点导致判断落空。
+function bindPlainDrag(el) {
+  el.addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0 || ev.altKey || ev.ctrlKey || ev.shiftKey) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragging = true;
+    document.documentElement.style.setProperty('user-select', 'none', 'important');
+    ipcRenderer.send('vr-drag-start');
+  });
+}
+
 function buildToolbar() {
   if (!document.body) return false;
   if (document.getElementById(BAR_ID)) return true;
@@ -697,6 +711,7 @@ function buildToolbar() {
   handle.style.fontSize = '11.5px';
   handle.style.cursor = 'move';
   handle.style.setProperty('-webkit-app-region', 'drag');
+  bindPlainDrag(handle);
   handle.textContent = '阅读层';
   bar.appendChild(handle);
 
@@ -717,9 +732,11 @@ function buildToolbar() {
   // 整条 bar 是 drag，页签容器是 no-drag，所以必须留一块 flex:1 的拖动区，
   // 否则把 handle 固定成 52px 之后，整条工具条只剩最左边能拖 —— 老 bug。
   const spacer = document.createElement('div');
+  spacer.setAttribute('data-vr', 'spacer');   // 普通拖动的命中区（见下方 mousedown）
   spacer.style.flex = '1';
   spacer.style.height = '100%';
   spacer.style.setProperty('-webkit-app-region', 'drag');
+  bindPlainDrag(spacer);
   bar.appendChild(spacer);
 
   const makeBtn = (label, tip, cb) => {
@@ -2134,7 +2151,10 @@ window.addEventListener('dragstart', (e) => {
 }, true);
 
 window.addEventListener('mousedown', (e) => {
-  if (e.altKey && e.button === 0 && !e.ctrlKey && !e.shiftKey) {
+  // Alt+左键：在页面任意位置都能拖（原有能力，保留）。
+  // 工具条拖动区的普通左键拖动由 bindPlainDrag 在元素上直接绑定。
+  const altDrag = e.altKey && e.button === 0 && !e.ctrlKey && !e.shiftKey;
+  if (altDrag) {
     e.preventDefault();
     e.stopPropagation();
     dragging = true;

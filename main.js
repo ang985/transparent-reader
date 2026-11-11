@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { buildCSS, buildDarkCSS } = require('./styles');
@@ -76,17 +76,24 @@ const DEFAULT_STATE = {
 
 let state = { ...DEFAULT_STATE };
 
-// 页签 = 一个同尺寸的 BrowserWindow，同一时刻只显示 active 那一个。
-// 之所以还用"多窗口伪装单窗口"而不是 WebContentsView：透明窗口 + 无边框这套
-// 已经被验证过（WebContentsView 的透明合成不可控），preload 里的样式注入、
-// 弹窗识别、查找、自动滚动全都不用改一行。
-// 不变式：**任何时刻最多一个 overlays 里的窗口可见**。所有显示路径最终都要过
-// activateTab / hideOtherOverlays，绕过它们就会复发"两个窗口叠在一起"。
-const overlays = new Set();   // 所有页签窗口
+// 页签 = 一个 WebContentsView，全部挂在**同一个**容器窗口 hostWin 上。
+// 这是根治"切页签会闪"的关键：以前每个页签一个 BrowserWindow，切页签必须
+// hide 旧的 + show 新的，而 show 一个被隐藏过的透明窗口会让 Chromium 整页
+// 重新光栅化，头一两帧就是半成品 —— 三个场景（开链接/切页签/Esc 关页签）
+// 都踩在这条路径上。现在窗口本身永远 mapped、永远不 hide/show，切换只是把
+// 目标 view 挂到 contentView 上，画面是现成的，物理上不可能闪。
+//
+// 以前注释里写"WebContentsView 的透明合成不可控"，实测（Electron 33，
+// transparent 容器 + view.setBackgroundColor('#00000000')）已推翻：透明正常，
+// 两个 view 每 2 秒互切，逐帧采样无渐进上色、无露桌面。
+const overlays = new Set();   // 所有页签（TabShell 适配器，见下）
+let hostWin = null;           // 唯一的真实窗口（容器）
+let mountedView = null;       // 当前挂在 contentView 上的 view
+let hostHidden = false;       // 收起胶囊 / 托盘隐藏时把容器透明停放
 let tabSeq = 0;               // 页签 id 自增
 let activeTabId = null;       // 当前显示的页签
-let overlayWin = null;        // 当前页签窗口（= activeTabId 对应的窗口，供既有代码复用）
-let winSeq = 0;               // 窗口代号：异步回调里判断"还是不是当初那个窗口"
+let overlayWin = null;        // 当前页签（TabShell，供既有代码复用）
+let winSeq = 0;               // 页签代号
 let lastActive = null;
 let panelWin = null;
 let dragTimer = null;
@@ -360,6 +367,179 @@ function overlayBounds() {
   return { x: Math.round(x), y: Math.round(y), w, h };
 }
 
+// ------------------------------------------------------------
+// 容器窗口 + 页签适配器
+//
+// TabShell 把 WebContentsView 包装成"看起来像 BrowserWindow"的对象：
+// 页面级操作走 view.webContents，窗口级操作走唯一的 hostWin。这样原来
+// 两千多行里 win.xxx 的调用几乎一行都不用改，改造风险被圈在这一个文件里。
+// ------------------------------------------------------------
+function ensureHost() {
+  if (hostWin && !hostWin.isDestroyed()) return hostWin;
+  const b = overlayBounds();
+  hostWin = new BrowserWindow({
+    x: b.x, y: b.y, width: b.w, height: b.h,
+    frame: false, transparent: true, backgroundColor: '#00000000',
+    hasShadow: false, movable: true,
+    resizable: state.lockSize === false,
+    minWidth: MIN_W, minHeight: MIN_H,
+    minimizable: false, maximizable: false, fullscreenable: false,
+    skipTaskbar: true, alwaysOnTop: state.onTop !== false,
+    show: true, title: 'Document',
+  });
+  hostWin.__topLevel = state.onTop !== false ? 'screen-saver' : 'normal';
+  try { hostWin.setMenuBarVisibility(false); } catch (_) {}
+  try { hostWin.setSkipTaskbar(true); } catch (_) {}
+  // 窗口级事件只绑一次，转发给当前页签，复用原来的 resized/moved/focus 回调。
+  hostWin.on('resized', () => { const s = currentOverlay(); if (s) s.emit('resized'); });
+  hostWin.on('moved', () => { const s = currentOverlay(); if (s) s.emit('moved'); });
+  hostWin.on('focus', () => { const s = currentOverlay(); if (s) s.emit('focus'); });
+  hostWin.on('closed', () => { hostWin = null; mountedView = null; });
+  log('host window created #' + hostWin.id);
+  return hostWin;
+}
+
+function tabFromWebContents(wc) {
+  if (!wc) return null;
+  for (const s of overlays) {
+    if (!s.isDestroyed() && s.webContents === wc) return s;
+  }
+  return null;
+}
+
+// 阅读层页签返回 TabShell；面板 / 胶囊这些真实窗口仍然返回 BrowserWindow。
+function winFromWebContents(wc) {
+  const s = tabFromWebContents(wc);
+  if (s) return s;
+  try { return winFromWebContents(wc); } catch (_) { return null; }
+}
+
+function detachView(view) {
+  if (!view || !hostWin || hostWin.isDestroyed()) return;
+  try { hostWin.contentView.removeChildView(view); } catch (_) { /* 已摘掉 */ }
+  if (mountedView === view) mountedView = null;
+}
+
+// 切换页签 = 换一个 view。**容器窗口始终 mapped，绝不 hide/show。**
+function mountTab(shell) {
+  if (!shell || shell.isDestroyed()) return;
+  const host = ensureHost();
+  const view = shell.__view;
+  if (mountedView === view) {
+    if (hostHidden) { hostHidden = false; try { host.setOpacity(1); } catch (_) {} }
+    return;
+  }
+  if (mountedView) detachView(mountedView);
+  try {
+    host.contentView.addChildView(view);
+    const [w, h] = host.getSize();
+    view.setBounds({ x: 0, y: 0, width: w, height: h });
+    // 窗口尺寸变了要让当前 view 跟着铺满，否则右侧/底部会露空白。
+    if (!host.__sizeHooked) {
+      host.__sizeHooked = true;
+      host.on('resized', () => {
+        if (!mountedView || !hostWin || hostWin.isDestroyed()) return;
+        const [nw, nh] = hostWin.getSize();
+        try { mountedView.setBounds({ x: 0, y: 0, width: nw, height: nh }); } catch (_) {}
+      });
+    }
+  } catch (e) {
+    log('mount view failed: ' + e.message);
+  }
+  mountedView = view;
+  if (hostHidden) { hostHidden = false; try { host.setOpacity(1); } catch (_) {} }
+  try { host.setIgnoreMouseEvents(false); } catch (_) {}
+}
+
+function destroyTab(shell, force) {
+  if (!shell || shell.__dead) return;
+  // close 事件里会先把下一个页签顶上来，避免中间出现空窗口
+  if (!force) shell.emit('close');
+  detachView(shell.__view);
+  shell.__dead = true;
+  overlays.delete(shell);
+  try { shell.__view.webContents.close(); } catch (_) {}
+  shell.__view = null;
+  // 最后一个页签关掉后，容器窗口不能继续透明地挡在屏幕上：
+  // 停放（opacity 0 + 鼠标穿透）但保持 mapped，下次开窗仍是瞬时的。
+  if (overlays.size === 0 && hostWin && !hostWin.isDestroyed()) {
+    hostHidden = true;
+    try { hostWin.setOpacity(0); } catch (_) {}
+    try { hostWin.setIgnoreMouseEvents(true); } catch (_) {}
+  }
+  shell.emit('closed');
+  sendTabs();
+}
+
+function makeTabShell(view, st) {
+  const wc = view.webContents;
+  const shell = {
+    __st: st,
+    __view: view,
+    __dead: false,
+    __listeners: Object.create(null),
+    __topLevel: hostWin ? hostWin.__topLevel : 'screen-saver',
+    webContents: wc,
+
+    isDestroyed() { return this.__dead || !wc || wc.isDestroyed(); },
+    isVisible() {
+      return !!(hostWin && !hostWin.isDestroyed() && !hostHidden && mountedView === view);
+    },
+    show() { mountTab(shell); },
+    showInactive() { mountTab(shell); },
+    hide() { if (mountedView === view) detachView(view); },
+    moveTop() { if (hostWin && !hostWin.isDestroyed()) hostWin.moveTop(); },
+    focus() { if (hostWin && !hostWin.isDestroyed()) hostWin.focus(); },
+    setBounds(b) { if (hostWin && !hostWin.isDestroyed()) hostWin.setBounds(b); },
+    getBounds() {
+      if (hostWin && !hostWin.isDestroyed()) return hostWin.getBounds();
+      const b = overlayBounds();
+      return { x: b.x, y: b.y, width: b.w, height: b.h };
+    },
+    getSize() { return hostWin && !hostWin.isDestroyed() ? hostWin.getSize() : [state.width, state.height]; },
+    getPosition() { return hostWin && !hostWin.isDestroyed() ? hostWin.getPosition() : [state.x || 0, state.y || 0]; },
+    setPosition(x, y) { if (hostWin && !hostWin.isDestroyed()) hostWin.setPosition(x, y); },
+    setAlwaysOnTop(on, level) {
+      if (hostWin && !hostWin.isDestroyed()) {
+        hostWin.setAlwaysOnTop(on, level);
+        hostWin.__topLevel = level;
+      }
+      shell.__topLevel = level;
+    },
+    isAlwaysOnTop() { return hostWin && !hostWin.isDestroyed() ? hostWin.isAlwaysOnTop() : false; },
+    setOpacity(o) { if (hostWin && !hostWin.isDestroyed()) hostWin.setOpacity(o); },
+    setIgnoreMouseEvents(on, opts) {
+      if (hostWin && !hostWin.isDestroyed()) hostWin.setIgnoreMouseEvents(on, opts);
+    },
+    setResizable(r) { if (hostWin && !hostWin.isDestroyed()) hostWin.setResizable(r); },
+    isResizable() { return hostWin && !hostWin.isDestroyed() ? hostWin.isResizable() : true; },
+    setMenuBarVisibility() {},
+    setSkipTaskbar() {},
+    isMinimized() { return false; },
+    restore() {},
+    minimize() {},
+    loadURL(u) { return wc.loadURL(u); },
+    reload() { return wc.reload(); },
+    destroy() { destroyTab(shell, true); },
+    close() { destroyTab(shell, false); },
+
+    on(ev, fn) {
+      (this.__listeners[ev] || (this.__listeners[ev] = [])).push(fn);
+      return this;
+    },
+    once(ev, fn) { fn.__vrOnce = true; return this.on(ev, fn); },
+    emit(ev, ...args) {
+      const arr = this.__listeners[ev] || [];
+      this.__listeners[ev] = arr.filter((f) => !f.__vrOnce);
+      for (const f of arr) {
+        try { f(...args); } catch (e) { log('tab event ' + ev + ': ' + e.message); }
+      }
+      return arr.length > 0;
+    },
+  };
+  return shell;
+}
+
 function createOverlay(rawUrl, opts = {}) {
   let url = String(rawUrl || '').trim();
   if (!url) return null;
@@ -376,26 +556,23 @@ function createOverlay(rawUrl, opts = {}) {
   // 后续页签一律由 activateTab 负责显示，见下面 reveal 里的判断。
   const hasExisting = overlays.size > 0;
 
-  const win = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.w,
-    height: b.h,
-    frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
-    hasShadow: false,
-    resizable: state.lockSize === false,
-    movable: true,
-    minWidth: MIN_W,
-    minHeight: MIN_H,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    alwaysOnTop: state.onTop !== false,
-    show: false,
-    title: 'Document',
+  const st = {
+    alpha: state.alpha,
+    zoom: clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX),
+    fontScale: clamp(state.fontScale || 1, FONT_MIN, FONT_MAX),
+    hideImages: state.hideImages,
+    focus: state.focus,
+    tabId: ++tabSeq,
+    id: ++winSeq,
+    title: '',
+    url,
+    dark: false,        // 当前页面是否按深色蒙版渲染（由 preload 上报）
+    eff: state.alpha,   // 实际生效浓度（深色页有下限，可能大于 alpha）
+  };
+
+  // 容器窗口只有一个，且从创建起就 mapped；每个页签只是一张 WebContentsView。
+  ensureHost();
+  const view = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload-overlay.js'),
       contextIsolation: true,
@@ -413,20 +590,25 @@ function createOverlay(rawUrl, opts = {}) {
       ],
     },
   });
-
-  win.__st = {
-    alpha: state.alpha,
-    zoom: clamp(state.zoom || 1, ZOOM_MIN, ZOOM_MAX),
-    fontScale: clamp(state.fontScale || 1, FONT_MIN, FONT_MAX),
-    hideImages: state.hideImages,
-    focus: state.focus,
-    tabId: ++tabSeq,
-    id: ++winSeq,
-    title: '',
-    url,
-    dark: false,        // 当前页面是否按深色蒙版渲染（由 preload 上报）
-    eff: state.alpha,   // 实际生效浓度（深色页有下限，可能大于 alpha）
-  };
+  // 视图自身背景也必须透明，否则会把容器窗口的透明效果盖成白底。
+  try { view.setBackgroundColor('#00000000'); } catch (_) {}
+  // 先挂一次再摘掉：让这张视图至少被合成过一帧。实测这样后续
+  // remove/add 切换时是瞬时的，不会出现"第一次切过去要重新画"的空白。
+  try {
+    hostWin.contentView.addChildView(view);
+    view.setBounds({ x: 0, y: 0, width: b.w, height: b.h });
+    // 后台恢复的页签（activate:false）只预热、不占用当前视图
+    if (hasExisting || opts.activate === false) hostWin.contentView.removeChildView(view);
+    else {
+      mountedView = view;
+      // 首个页签是直接挂上的（没经过 mountTab），这里必须显式放开鼠标，
+      // 否则容器窗口会一直忽略点击，页面里的链接、工具条全都点不动。
+      try { hostWin.setIgnoreMouseEvents(false); } catch (_) {}
+    }
+  } catch (e) {
+    log('prime view failed: ' + e.message);
+  }
+  const win = makeTabShell(view, st);
 
   win.setAlwaysOnTop(state.onTop !== false, state.onTop !== false ? 'screen-saver' : 'normal');
   win.__topLevel = state.onTop !== false ? 'screen-saver' : 'normal';
@@ -540,7 +722,7 @@ function createOverlay(rawUrl, opts = {}) {
       win.moveTop();
     }
   };
-  win.once('ready-to-show', reveal);
+  win.webContents.once('dom-ready', reveal);
   // 透明窗口不一定会触发 ready-to-show，必须加时间兜底
   setTimeout(reveal, 400);
   setTimeout(reveal, 1600);
@@ -746,23 +928,20 @@ function sendTabs() {
   }
 }
 
-// 拖动/缩放当前页签后，把其它页签的窗口摆到同一位置同一尺寸。
-// 不做这一步，切过去的页签会停在旧位置，看起来像"跳到别处去了"。
-function mirrorBounds(win) {
-  const b = overlayBounds();
-  for (const w of overlays) {
-    if (w === win || w.isDestroyed()) continue;
-    try {
-      w.setBounds({ x: b.x, y: b.y, width: b.w, height: b.h });
-    } catch (_) {}
-  }
-}
+// 单窗口架构下所有页签共享同一个容器，天然同位置同尺寸，无需再逐个摆位。
+function mirrorBounds(_win) {}
 
-// 保证任何时刻最多只有一个浮层窗口可见。keep 传 null 表示全部隐藏。
+// 单窗口架构：keep 非空 = 把那个 view 挂上（其它 view 本来就没挂）；
+// keep 为 null = 收起，把容器透明停放，但窗口仍然 mapped —— 展开时不闪。
 function hideOtherOverlays(keep) {
-  for (const w of overlays) {
-    if (!w || w === keep || w.isDestroyed()) continue;
-    try { if (w.isVisible()) w.hide(); } catch (_) { /* ignore */ }
+  if (keep && !keep.isDestroyed()) {
+    mountTab(keep);
+    return;
+  }
+  if (hostWin && !hostWin.isDestroyed()) {
+    hostHidden = true;
+    try { hostWin.setOpacity(0); } catch (_) {}
+    try { hostWin.setIgnoreMouseEvents(true); } catch (_) {}
   }
 }
 
@@ -1484,7 +1663,7 @@ ipcMain.handle('vr-open', (_e, url) => {
 
 // preload 识别出页面深浅后上报：面板据此说明"实际按 xx% 渲染"
 ipcMain.on('vr-theme', (e, info) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed() || !win.__st || !info) return;
   const dark = !!info.dark;
   const eff = typeof info.eff === 'number' ? clamp(info.eff, ALPHA_MIN, ALPHA_MAX) : win.__st.alpha;
@@ -1627,7 +1806,7 @@ ipcMain.on('vr-tab-new', () => { showPanel(); });
 // 用 Chromium 原生的 findInPage：跨节点、富文本、Shadow DOM 都能正确匹配，
 // 而且自带"滚到匹配处 + 高亮当前项"，自己遍历 DOM 做不到这个效果。
 ipcMain.on('vr-find', (e, payload) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed()) return;
   const text = String((payload && payload.text) || '');
   if (!text) {
@@ -1645,7 +1824,7 @@ ipcMain.on('vr-find', (e, payload) => {
 });
 
 ipcMain.on('vr-find-stop', (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed()) return;
   // clearSelection：不留选中高亮，否则关掉查找后页面上还挂着几块选区
   try { win.webContents.stopFindInPage('clearSelection'); } catch (_) {}
@@ -1803,13 +1982,13 @@ ipcMain.handle('vr-mini-info', () => {
 });
 
 ipcMain.handle('vr-panel-min', (e) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = winFromWebContents(e.sender);
   if (w && !w.isDestroyed()) w.minimize();
   return { ok: true };
 });
 
 ipcMain.handle('vr-panel-hide', (e) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = winFromWebContents(e.sender);
   if (w && !w.isDestroyed()) w.hide();
   return { ok: true };
 });
@@ -1817,7 +1996,7 @@ ipcMain.handle('vr-panel-hide', (e) => {
 ipcMain.handle('vr-quit', () => { app.quit(); return { ok: true }; });
 
 ipcMain.handle('vr-fit', (e, h) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = winFromWebContents(e.sender);
   if (!w || w.isDestroyed()) return { ok: false };
   const [cw] = w.getSize();
   const target = clamp(Number(h) || 0, 420, 960);
@@ -1826,12 +2005,12 @@ ipcMain.handle('vr-fit', (e, h) => {
 });
 
 ipcMain.on('vr-close', (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (win && !win.isDestroyed()) win.close();
 });
 
 ipcMain.on('vr-zoom-step', (e, dir) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed()) return;
   const cur = win.__st.zoom || 1;
   const next = dir > 0 ? cur * ZOOM_STEP : cur / ZOOM_STEP;
@@ -1841,7 +2020,7 @@ ipcMain.on('vr-zoom-step', (e, dir) => {
 
 // Alt+滚轮调浓度（上滚更浓、下滚更淡）
 ipcMain.on('vr-alpha-step', (e, dir) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed() || !win.__st) return;
   stepAlpha(win, dir > 0 ? 1 : -1);
 });
@@ -1859,7 +2038,7 @@ ipcMain.handle('vr-site-clear', () => {
   return panelState();
 });
 
-ipcMain.on('vr-prefs-ask', (e) => {  const win = BrowserWindow.fromWebContents(e.sender);
+ipcMain.on('vr-prefs-ask', (e) => {  const win = winFromWebContents(e.sender);
   if (!win || win.isDestroyed()) return;
   try {
     win.webContents.send('vr-zoom', clamp(win.__st.zoom || 1, ZOOM_MIN, ZOOM_MAX));
@@ -1868,12 +2047,12 @@ ipcMain.on('vr-prefs-ask', (e) => {  const win = BrowserWindow.fromWebContents(e
 });
 
 ipcMain.on('vr-zoom-reset', (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (win && !win.isDestroyed()) setZoom(win, 1);
 });
 
 ipcMain.on('vr-reload', (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (win && !win.isDestroyed()) win.reload();
 });
 
@@ -1885,7 +2064,7 @@ function navOf(win) {
 }
 
 ipcMain.handle('vr-nav-state', (e) => {
-  const h = navOf(BrowserWindow.fromWebContents(e.sender));
+  const h = navOf(winFromWebContents(e.sender));
   if (!h) return { back: false, forward: false };
   try {
     return { back: h.canGoBack(), forward: h.canGoForward() };
@@ -1895,12 +2074,12 @@ ipcMain.handle('vr-nav-state', (e) => {
 });
 
 ipcMain.on('vr-back', (e) => {
-  const h = navOf(BrowserWindow.fromWebContents(e.sender));
+  const h = navOf(winFromWebContents(e.sender));
   try { if (h && h.canGoBack()) h.goBack(); } catch (_) {}
 });
 
 ipcMain.on('vr-forward', (e) => {
-  const h = navOf(BrowserWindow.fromWebContents(e.sender));
+  const h = navOf(winFromWebContents(e.sender));
   try { if (h && h.canGoForward()) h.goForward(); } catch (_) {}
 });
 
@@ -1909,7 +2088,7 @@ ipcMain.on('vr-panel', () => {
 });
 
 ipcMain.on('vr-drag-start', (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (!win) return;
   const start = screen.getCursorScreenPoint();
   const [wx, wy] = win.getPosition();
@@ -1924,7 +2103,7 @@ ipcMain.on('vr-drag-start', (e) => {
 ipcMain.on('vr-drag-stop', (e) => {
   clearInterval(dragTimer);
   dragTimer = null;
-  const win = BrowserWindow.fromWebContents(e.sender);
+  const win = winFromWebContents(e.sender);
   if (win && !win.isDestroyed()) {
     const [x, y] = win.getPosition();
     state.x = x;
