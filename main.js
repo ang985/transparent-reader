@@ -113,7 +113,11 @@ const FONT_STEP = 0.1;
 
 const ALPHA_MIN = 0;
 const ALPHA_MAX = 0.92;
-const ALPHA_STEP = 0.03;   // Alt+滚轮每档的浓度变化
+// Alt+滚轮每档的浓度变化。
+// 原来是 0.03：滚 6 格才 18%，隔在白色窗口前面基本看不出差别，
+// 用户会以为"快捷键没生效"。改成 0.05 后 20 格走完全程，
+// 一次滚动（3~4 格）就有肉眼可辨的变化。
+const ALPHA_STEP = 0.05;
 
 // 自动滚动速度范围（px/秒）
 const SCROLL_MIN = 15;
@@ -411,7 +415,12 @@ function tabFromWebContents(wc) {
 function winFromWebContents(wc) {
   const s = tabFromWebContents(wc);
   if (s) return s;
-  try { return winFromWebContents(wc); } catch (_) { return null; }
+  // 这里必须是 BrowserWindow.fromWebContents，**不能写成 winFromWebContents**。
+  // 0.4.4 重构时用全局替换把 18 处 fromWebContents 换成本函数，连这条回退行
+  // 一起换掉了，于是它自己调自己：栈溢出被 catch 吞掉、恒返回 null。
+  // 后果是所有"从面板发起的窗口操作"静默失效 —— 最小化、关闭面板、
+  // 面板自适应高度（vr-fit）全都点了没反应，而且不报错，极难发现。
+  try { return BrowserWindow.fromWebContents(wc); } catch (_) { return null; }
 }
 
 function detachView(view) {
@@ -420,15 +429,32 @@ function detachView(view) {
   if (mountedView === view) mountedView = null;
 }
 
+// 容器的鼠标状态只有一个真相：穿透开关。停放时另设 true，见 hideOtherOverlays。
+// 任何把容器从停放状态恢复的路径都必须走这里，否则会出现
+// "窗口看得见但点不动"（展开胶囊后）或 "穿透开着却被悄悄关掉"（切页签后）。
+function applyHostMouse() {
+  if (!hostWin || hostWin.isDestroyed()) return;
+  try {
+    if (passthrough) hostWin.setIgnoreMouseEvents(true, { forward: true });
+    else hostWin.setIgnoreMouseEvents(false);
+  } catch (_) { /* ignore */ }
+}
+
 // 切换页签 = 换一个 view。**容器窗口始终 mapped，绝不 hide/show。**
 function mountTab(shell) {
   if (!shell || shell.isDestroyed()) return;
   const host = ensureHost();
   const view = shell.__view;
-  if (mountedView === view) {
-    if (hostHidden) { hostHidden = false; try { host.setOpacity(1); } catch (_) {} }
-    return;
+  // 容器可能被停放过（收起胶囊 / 托盘隐藏 / 关掉最后一个页签）。
+  // 无论是"换视图"还是"只把当前视图请回来"，都要先还原：opacity=1
+  // + 鼠标状态跟随穿透开关。这一步放在 early-return 之前是关键 ——
+  // 展开胶囊时 mountedView 没变，早退会漏掉鼠标恢复，页面就点不动了。
+  if (hostHidden) {
+    hostHidden = false;
+    try { host.setOpacity(1); } catch (_) {}
   }
+  applyHostMouse();
+  if (mountedView === view) return;
   if (mountedView) detachView(mountedView);
   try {
     host.contentView.addChildView(view);
@@ -447,8 +473,7 @@ function mountTab(shell) {
     log('mount view failed: ' + e.message);
   }
   mountedView = view;
-  if (hostHidden) { hostHidden = false; try { host.setOpacity(1); } catch (_) {} }
-  try { host.setIgnoreMouseEvents(false); } catch (_) {}
+  applyHostMouse();
 }
 
 function destroyTab(shell, force) {
@@ -491,6 +516,7 @@ function makeTabShell(view, st) {
     moveTop() { if (hostWin && !hostWin.isDestroyed()) hostWin.moveTop(); },
     focus() { if (hostWin && !hostWin.isDestroyed()) hostWin.focus(); },
     setBounds(b) { if (hostWin && !hostWin.isDestroyed()) hostWin.setBounds(b); },
+    setSize(w, h) { if (hostWin && !hostWin.isDestroyed()) hostWin.setSize(w, h); },
     getBounds() {
       if (hostWin && !hostWin.isDestroyed()) return hostWin.getBounds();
       const b = overlayBounds();
@@ -601,9 +627,13 @@ function createOverlay(rawUrl, opts = {}) {
     if (hasExisting || opts.activate === false) hostWin.contentView.removeChildView(view);
     else {
       mountedView = view;
-      // 首个页签是直接挂上的（没经过 mountTab），这里必须显式放开鼠标，
-      // 否则容器窗口会一直忽略点击，页面里的链接、工具条全都点不动。
-      try { hostWin.setIgnoreMouseEvents(false); } catch (_) {}
+      // 首个页签是直接挂上的（没经过 mountTab），必须显式还原容器：
+      // 可能刚关掉最后一个页签，容器还停在 opacity 0 + 鼠标穿透的停放态。
+      if (hostHidden) {
+        hostHidden = false;
+        try { hostWin.setOpacity(1); } catch (_) {}
+      }
+      applyHostMouse();
     }
   } catch (e) {
     log('prime view failed: ' + e.message);
@@ -1131,10 +1161,12 @@ function currentOverlay() {
   return list[list.length - 1] || null;
 }
 
-function refresh(win) {
+function refresh(win, userAlpha) {
   if (!win || win.isDestroyed()) return;
   applyCSS(win);
-  win.webContents.send('vr-alpha', win.__st.alpha);
+  // 第三个参数是"这是用户刚调过浓度"。preload 只有在它为 true 时才弹数值提示条，
+  // 否则切页签、补发偏好、切"隐藏图片/专注模式"时都会闪一下"背景浓度 xx%"。
+  win.webContents.send('vr-alpha', win.__st.alpha, !!userAlpha);
 }
 
 function syncPagePrefs(win) {
@@ -1231,8 +1263,9 @@ function setZoom(win, z) {
     win.webContents.setZoomFactor(next);
   } catch (_) {}
   // 通知页面：工具条按 1/zoom 反向缩放，保持原尺寸不跟着变大
+  // 第二个 true = 用户主动改的，渲染层据此弹数值提示条
   try {
-    win.webContents.send('vr-zoom', next);
+    win.webContents.send('vr-zoom', next, true);
   } catch (_) {}
   saveStateDebounced();
 }
@@ -1258,7 +1291,7 @@ function setAlpha(win, v) {
   win.__st.alpha = clamp(v, ALPHA_MIN, ALPHA_MAX);
   state.alpha = win.__st.alpha;
   rememberSite(win, { alpha: Number(win.__st.alpha.toFixed(3)) });
-  refresh(win);
+  refresh(win, true);
   // 拖滑块 / Alt+滚轮会连续触发，这里用防抖，避免每一下都同步写盘
   saveStateDebounced();
   notifyPanel();
@@ -1513,8 +1546,10 @@ function scrollOverlay(win, dy) {
 function toggleVisible() {
   const win = currentOverlay();
   if (!win) return;
-  if (win.isVisible()) win.hide();
-  else raiseOverlay();   // 走 raise 才顺便把键盘焦点拿回来
+  // 单窗口架构下容器始终 mapped，"隐藏"必须把整个容器透明停放。
+  // 只摘掉 view（win.hide）会留一扇透明但仍吃鼠标点击的空窗口。
+  if (win.isVisible()) hideOtherOverlays(null);
+  else raiseOverlay(win);   // 走 raise 才顺便把键盘焦点拿回来
 }
 
 function panelState() {
@@ -1931,12 +1966,11 @@ function collapseOverlay() {
 
   miniFor = win;
   miniBounds = win.getBounds();
-  // 先把胶囊造出来再隐藏主窗：否则这一瞬间没有任何窗口，
-  // 会触发 window-all-closed 把程序退掉。
-  // 胶囊显示并拿到焦点之后，再把主窗藏起来 —— 焦点是无缝转移的，
-  // 中间不会出现"焦点跑到别的程序上又被抢回来"的闪动。
-  // 收起时要隐藏**所有**页签窗口，不只是当前这个：多页签下每个 tab 都是
-  // 独立窗口，漏掉一个就会留下「胶囊 + 旧窗口」同屏的错乱状态。
+  // 先把胶囊造出来再把容器透明停放：容器始终 mapped，不会触发
+  // window-all-closed，也不会有 hide/show 带来的重新合成。
+  // 胶囊显示并拿到焦点之后再停放容器，焦点是无缝转移的。
+  // 停用的是整个容器（而不是某个页签），多页签下不会出现
+  // 「胶囊 + 旧窗口」同屏的错乱状态。
   miniWin = makeMiniWindow(() => { hideOtherOverlays(null); });
   log('collapse overlay #' + (win.__st && win.__st.tabId) + ' -> mini at ' + miniBounds.x + ',' + miniBounds.y);
   notifyPanel();

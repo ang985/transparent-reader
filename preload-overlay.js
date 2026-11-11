@@ -42,6 +42,7 @@ function applyBarZoom() {
   if (de) {
     de.style.setProperty('--vr-bar-pad', (BAR_HEIGHT / zoomFactor).toFixed(2) + 'px');
   }
+  syncHudZoom();
   const bar = document.getElementById(BAR_ID);
   if (!bar) return;
   bar.style.setProperty('zoom', String(1 / zoomFactor), 'important');
@@ -49,6 +50,114 @@ function applyBarZoom() {
   // 它会和工具条之间裂开一条缝（30px 也会被 zoom 放大）
   const find = document.getElementById(FIND_ID);
   if (find) find.style.setProperty('zoom', String(1 / zoomFactor), 'important');
+}
+
+// ---------------- 改动数值时的提示条 ----------------
+// 为什么需要它：蒙版是"垫在页面后面的一层白"，背后如果正好是白色窗口，
+// 18% 和 24% 的差别肉眼几乎为零。用户滚了滚轮、状态确实变了，
+// 屏幕却没有任何反馈，只能得出"这个快捷键没实现"的结论。
+// 于是每次调浓度/缩放都在工具条下面弹一个一秒就散的小药丸，把数值直接写出来。
+const HUD_ID = 'vr-hud';
+let hudEl = null;
+let hudTimer = 0;
+
+function hudNode() {
+  if (hudEl && hudEl.isConnected) return hudEl;
+  if (!document.body) return null;
+  const el = document.createElement('div');
+  el.id = HUD_ID;
+  el.setAttribute('data-vr', 'hud');
+  const st = el.style;
+  st.setProperty('position', 'fixed', 'important');
+  st.setProperty('left', '50%', 'important');
+  st.setProperty('top', '38px', 'important');
+  st.setProperty('transform', 'translateX(-50%)', 'important');
+  st.setProperty('z-index', '2147483647', 'important');
+  st.setProperty('padding', '5px 13px', 'important');
+  st.setProperty('border-radius', '999px', 'important');
+  st.setProperty('background', 'rgba(22,24,29,.84)', 'important');
+  st.setProperty('color', '#f4f6fa', 'important');
+  st.setProperty('font-size', '12.5px', 'important');
+  st.setProperty('line-height', '1.35', 'important');
+  st.setProperty('font-family', '"Microsoft YaHei UI","Segoe UI",sans-serif', 'important');
+  st.setProperty('white-space', 'nowrap', 'important');
+  st.setProperty('text-shadow', 'none', 'important');
+  st.setProperty('box-shadow', '0 6px 18px rgba(0,0,0,.28)', 'important');
+  st.setProperty('pointer-events', 'none', 'important');
+  st.setProperty('user-select', 'none', 'important');
+  st.setProperty('opacity', '0', 'important');
+  st.setProperty('transition', 'opacity .16s ease', 'important');
+  document.body.appendChild(el);
+  hudEl = el;
+  syncHudZoom();
+  return el;
+}
+
+// 页面缩放会把提示条一起放大；用和工具条同样的反向缩放抵消，
+// 顶部偏移也得除掉缩放，否则大倍率下会被推出屏幕
+function syncHudZoom() {
+  if (!hudEl || !hudEl.isConnected) return;
+  hudEl.style.setProperty('zoom', String(1 / zoomFactor), 'important');
+  hudEl.style.setProperty('top', (38 / zoomFactor).toFixed(2) + 'px', 'important');
+}
+
+function showHud(text) {
+  const el = hudNode();
+  if (!el) return;
+  if (el.textContent !== text) el.textContent = text;
+  syncHudZoom();
+  el.style.setProperty('opacity', '1', 'important');
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => {
+    if (hudEl && hudEl.isConnected) hudEl.style.setProperty('opacity', '0', 'important');
+  }, 1100);
+}
+
+// ---------------- 滚轮 / 缩放快捷键 ----------------
+// 只注册一次：页签切回来、页面重写 body 都不会重复挂。
+let wheelBound = false;
+function bindWheelShortcuts() {
+  if (wheelBound) return;
+  wheelBound = true;
+
+  // Ctrl + 滚轮：缩放页面（Ctrl+0 复位，Ctrl + / - 也行）
+  // Alt  + 滚轮：直接调背景浓度（上滚更浓、下滚更淡），不用去面板摸滑块
+  let lastZoomAt = 0;
+  let lastAlphaAt = 0;
+  window.addEventListener('wheel', (e) => {
+    // deltaY 为 0 的是横向滚动/触控板捏合，方向无意义，别拿它当"向下"
+    if (!e.deltaY) return;
+    if (e.altKey && !e.ctrlKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const now = Date.now();
+      if (now - lastAlphaAt < 40) return;
+      lastAlphaAt = now;
+      ipcRenderer.send('vr-alpha-step', e.deltaY < 0 ? 1 : -1);
+      return;
+    }
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const now = Date.now();
+    if (now - lastZoomAt < 45) return;
+    lastZoomAt = now;
+    ipcRenderer.send('vr-zoom-step', e.deltaY < 0 ? 1 : -1);
+  }, { passive: false, capture: true });
+
+  window.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      ipcRenderer.send('vr-zoom-step', 1);
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      ipcRenderer.send('vr-zoom-step', -1);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      ipcRenderer.send('vr-zoom-reset');
+    }
+  }, true);
 }
 
 // 工具条是否"常亮"：开启后不再随鼠标淡出，始终完全不透明
@@ -809,42 +918,10 @@ function buildToolbar() {
     if (!e.relatedTarget && !e.toElement) setBarActive(false);
   }, true);
 
-  // Ctrl + 滚轮：缩放页面（Ctrl+0 复位，Ctrl + / - 也行）
-  // Alt  + 滚轮：直接调背景浓度（上滚更浓、下滚更淡），不用去面板摸滑块
-  let lastZoomAt = 0;
-  let lastAlphaAt = 0;
-  window.addEventListener('wheel', (e) => {
-    if (e.altKey && !e.ctrlKey) {
-      e.preventDefault();
-      e.stopPropagation();
-      const now = Date.now();
-      if (now - lastAlphaAt < 40) return;
-      lastAlphaAt = now;
-      ipcRenderer.send('vr-alpha-step', e.deltaY < 0 ? 1 : -1);
-      return;
-    }
-    if (!e.ctrlKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const now = Date.now();
-    if (now - lastZoomAt < 45) return;
-    lastZoomAt = now;
-    ipcRenderer.send('vr-zoom-step', e.deltaY < 0 ? 1 : -1);
-  }, { passive: false, capture: true });
-
-  window.addEventListener('keydown', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    if (e.key === '=' || e.key === '+') {
-      e.preventDefault();
-      ipcRenderer.send('vr-zoom-step', 1);
-    } else if (e.key === '-' || e.key === '_') {
-      e.preventDefault();
-      ipcRenderer.send('vr-zoom-step', -1);
-    } else if (e.key === '0') {
-      e.preventDefault();
-      ipcRenderer.send('vr-zoom-reset');
-    }
-  }, true);
+  // 滚轮/缩放快捷键放到 bindWheelShortcuts() 里统一注册（见文件后半段）：
+  // 它们原来长在这个函数里，而工具条一旦被页面的"整体重写 body"清掉，
+  // 这个函数会再跑一遍、把监听器**再挂一份**，于是滚一格跳两档。
+  bindWheelShortcuts();
 
   applyBarZoom();
   paintBarOpacity();
@@ -2083,14 +2160,25 @@ window.addEventListener('resize', () => {
   setTimeout(tidyOverflowX, 150);
 });
 
-ipcRenderer.on('vr-alpha', (_e, v) => {
+ipcRenderer.on('vr-alpha', (_e, v, fromUser) => {
   if (typeof v !== 'number' || !isFinite(v)) return;
   const next = Math.min(0.92, Math.max(0, v));
   // 切页签时主进程会补发一遍偏好，值通常没变。原来这里无条件 paintRoot
   // + reportTheme，等于每次切换都强制整页重算；值没变就什么都不做。
-  if (Math.abs(next - veil) < 1e-6) return;
+  if (Math.abs(next - veil) < 1e-6) {
+    // 值没变也要给个反馈：比如已经滚到上限，用户不会以为滚轮失灵了
+    if (fromUser) showHud('背景浓度 ' + Math.round(effectiveVeil() * 100) + '%（已到头）');
+    return;
+  }
   veil = next;
   paintRoot();
+  // 提示条显示的是**实际生效**的浓度：深色页有 55% 下限，
+  // 这时滚轮滚到 10% 屏幕不会变，只有把真实值写出来才不会像"坏了"
+  if (fromUser) {
+    const eff = effectiveVeil();
+    showHud('背景浓度 ' + Math.round(eff * 100) + '%'
+      + (eff > veil + 1e-3 ? '（深色页下限）' : ''));
+  }
   reportTheme();   // 深色页有下限，实际值可能和滑块不同，要让面板知道
 });
 
@@ -2134,10 +2222,11 @@ ipcRenderer.on('vr-scroll-speed', (_e, v) => {
 
 ipcRenderer.on('vr-scroll-toggle', () => toggleAutoScroll());
 
-ipcRenderer.on('vr-zoom', (_e, z) => {
+ipcRenderer.on('vr-zoom', (_e, z, fromUser) => {
   if (typeof z === 'number' && isFinite(z) && z > 0) {
     zoomFactor = Math.min(2.4, Math.max(0.5, z));
     applyBarZoom();
+    if (fromUser) showHud('页面缩放 ' + Math.round(zoomFactor * 100) + '%');
     setTimeout(tidyOverflowX, 200);
   }
 });
